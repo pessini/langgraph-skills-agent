@@ -2,7 +2,7 @@
 
 This repository contains the example implementation from the Medium article:
 
-**Agent Skills for Production LangGraph Agents** - Giving agents domain expertise without bloating prompts using a progressive disclosure approach inspired by the Claude skill pattern.
+Link: [Stop Stuffing Your System Prompt: Build Scalable Agent Skills in LangGraph](https://medium.com/@pessini/stop-stuffing-your-system-prompt-build-scalable-agent-skills-in-langgraph-a9856378e8f6)
 
 It contains example skill definitions and supporting files used to demonstrate:
 

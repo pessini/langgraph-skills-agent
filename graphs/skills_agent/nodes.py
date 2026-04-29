@@ -31,6 +31,12 @@ logger = logging.getLogger(__name__)
 # tools without producing a final answer.
 MAX_TOOL_CALLS = 15
 
+# Mirrors BaseAgent's default `max_tool_retries`. Kept as a module-level
+# constant so should_continue (a simple state-only router) can reference
+# it without taking a runtime parameter. If you customize the agent's
+# retry budget when constructing SkillsAgent, update this value too.
+MAX_TOOL_RETRIES = 3
+
 # Used only by error_summary_node. The LLM is invoked WITHOUT tools so it
 # can only produce a plain-text response — prevents infinite retry loops
 # when retries are already exhausted.
@@ -124,7 +130,7 @@ def should_continue(
                 MAX_TOOL_CALLS,
             )
             return "error_summary_node"
-        if state.get("tool_retry_attempts", 0) >= 3:
+        if state.get("tool_retry_attempts", 0) >= MAX_TOOL_RETRIES:
             return "error_summary_node"
         return "tool_node"
     return "__end__"

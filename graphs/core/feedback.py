@@ -30,7 +30,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 
 class SuccessResponse(BaseModel):
@@ -64,6 +64,19 @@ class ToolFeedback(BaseModel):
     success: Optional[SuccessResponse] = None
     error: Optional[ErrorResponse] = None
     query: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _exactly_one_outcome_or_neither(self) -> "ToolFeedback":
+        # Both populated would let __str__ silently mask the error by
+        # preferring success — disallow the ambiguous shape outright.
+        # An empty ToolFeedback (neither success nor error) is still
+        # permitted and renders as "EMPTY" — useful for placeholder /
+        # in-flight states.
+        if self.success is not None and self.error is not None:
+            raise ValueError(
+                "ToolFeedback cannot include both 'success' and 'error'."
+            )
+        return self
 
     def is_success(self) -> bool:
         return self.success is not None

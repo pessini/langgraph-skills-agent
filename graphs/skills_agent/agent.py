@@ -1,8 +1,8 @@
 """Skills agent — compiled LangGraph graph.
 
 This module assembles and compiles the StateGraph for the Skills Agent.
-The actual node implementations live in ``utils/nodes.py``; this file
-is purely the graph wiring.
+The actual node implementations live in ``skills_agent/nodes.py``; this
+file is purely the graph wiring.
 
 Graph topology::
 
@@ -13,7 +13,8 @@ Graph topology::
 
 The ``context_schema=Context`` tells LangGraph to inject a ``Context``
 instance into every node via ``runtime.context``.  The Context holds the
-skill store and LLM configuration.
+skill store, LLM configuration, and the ``SkillsAgent`` instance that
+the nodes delegate to (see ``skills_agent/config.py``).
 """
 
 from langgraph.graph import StateGraph

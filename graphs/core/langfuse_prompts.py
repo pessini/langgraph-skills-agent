@@ -80,9 +80,18 @@ def get_langfuse_prompt(
             )
             final_name = custom_name
         except Exception as e:
+            # Only swallow "not found" style errors. Auth / network /
+            # config failures (AuthenticationError, ConnectionError,
+            # ConfigError, etc.) must propagate so they don't get
+            # masked as a missing custom prompt — that's the difference
+            # between "fall back to base prompt" and "Langfuse is down".
+            cls_name = type(e).__name__
+            if "NotFound" not in cls_name and "404" not in str(e):
+                raise
             logger.warning(
-                "Custom prompt '%s' not found, falling back to '%s': %s",
+                "Custom prompt '%s' not found (%s), falling back to '%s': %s",
                 custom_name,
+                cls_name,
                 prompt_name,
                 e,
             )
@@ -97,6 +106,10 @@ def get_langfuse_prompt(
 
     logger.info("Retrieved prompt '%s' (label=%s) from Langfuse", final_name, label)
 
-    if compile_vars:
+    if compile_vars is not None:
+        # Empty dict still triggers compile() — useful for templates with
+        # no placeholders or where the caller wants explicit "render now"
+        # semantics. Truthiness would skip the call and return the raw
+        # template body, conflicting with the docstring contract.
         return prompt_template.compile(**compile_vars), prompt_template
     return prompt_template.prompt, prompt_template

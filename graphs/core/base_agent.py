@@ -30,6 +30,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.tools import BaseTool
 from langgraph.prebuilt import InjectedState
+from pydantic import ValidationError
 
 from core.feedback import ErrorResponse, SuccessResponse, ToolFeedback
 from core.llm_errors import PERMANENT_LLM_ERRORS, TRANSIENT_LLM_ERRORS
@@ -353,9 +354,11 @@ class BaseAgent:
         if isinstance(raw, dict):
             try:
                 return ToolFeedback(**raw)
-            except Exception:
+            except (TypeError, ValidationError):
                 # Dict didn't match the schema — treat its repr as a
                 # plain success payload rather than failing the call.
+                # Other exception types are propagated (a real bug, not
+                # a shape mismatch).
                 return ToolFeedback(success=SuccessResponse(results=str(raw)))
         return ToolFeedback(success=SuccessResponse(results=str(raw)))
 
@@ -577,7 +580,17 @@ class BaseAgent:
                     break
                 if isinstance(meta, InjectedState):
                     key = getattr(meta, "field", None)
-                    args[field_name] = state if key is None else state[key]
+                    if key is None:
+                        args[field_name] = state
+                    elif key in state:
+                        args[field_name] = state[key]
+                    else:
+                        raise KeyError(
+                            f"InjectedState field '{key}' (for tool arg "
+                            f"'{field_name}', agent='{self.agent_name}') is "
+                            f"not present in graph state. Available keys: "
+                            f"{sorted(state.keys())}"
+                        )
                     injected.append(field_name)
                     break
         return injected

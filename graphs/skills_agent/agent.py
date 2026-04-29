@@ -19,13 +19,13 @@ skill store and LLM configuration.
 from langgraph.graph import StateGraph
 
 from skills_agent.config import Context
-from skills_agent.utils.nodes import (
+from skills_agent.nodes import (
     agent_node,
     error_summary_node,
     should_continue,
     tool_node,
 )
-from skills_agent.utils.state import State
+from skills_agent.state import State
 
 builder = StateGraph(State, context_schema=Context)
 builder.add_node(agent_node)

@@ -110,3 +110,51 @@ class TestEnsureToolCallPairs:
         synthetic = [m for m in out if _is_synthetic(m)]
         assert len(synthetic) == 1
         assert synthetic[0].tool_call_id == "Y"
+
+
+class _CapturingModel:
+    """Records the messages passed to ``ainvoke`` so tests can assert
+    that orphan repair ran on the no-tools path."""
+
+    def __init__(self) -> None:
+        self.last_payload: list[Any] = []
+
+    def bind_tools(self, _tools: list[Any]) -> "_CapturingModel":
+        return self
+
+    async def ainvoke(self, payload: Any) -> AIMessage:
+        self.last_payload = list(payload)
+        return AIMessage(content="summary")
+
+
+class TestCallLlmNoToolsRepairsOrphans:
+    """Regression for item #1 of the second CodeRabbit pass.
+
+    When ``should_continue`` routes directly to ``error_summary_node``
+    on an exhausted budget (``tool_call_count >= MAX_TOOL_CALLS``), the
+    latest AIMessage carries unresolved tool_calls. ``call_llm_no_tools``
+    must repair them before sending to the provider — otherwise the
+    error-summary path itself triggers a 400.
+    """
+
+    @pytest.mark.asyncio
+    async def test_no_tools_path_inserts_synthetic_for_orphan(self) -> None:
+        captured = _CapturingModel()
+        agent = BaseAgent(
+            agent_name="test",
+            model_factory=lambda: captured,
+            tools=[],
+        )
+        msgs = [
+            HumanMessage(content="hi"),
+            _ai_with_calls("orphan-tail"),
+        ]
+        await agent.call_llm_no_tools(msgs, system_prompt="sys")
+        # First payload entry is the system message; the rest is the
+        # repaired conversation.
+        assert captured.last_payload[0] == {"role": "system", "content": "sys"}
+        body = captured.last_payload[1:]
+        # Orphan must have been resolved by a synthetic ToolMessage.
+        synthetic = [m for m in body if _is_synthetic(m)]
+        assert len(synthetic) == 1
+        assert synthetic[0].tool_call_id == "orphan-tail"

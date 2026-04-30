@@ -139,6 +139,40 @@ class TestSkillsAgentNodes:
         assert update["tool_call_count"] == 5  # 3 + 2 calls
         assert len(update["messages"]) == 2
 
+    def test_should_continue_blocks_when_projected_exceeds_cap(self) -> None:
+        """count=14 + 2 pending tool_calls would push past MAX_TOOL_CALLS=15;
+        must route to error_summary instead of letting the cap be busted."""
+        cap = nodes_module.MAX_TOOL_CALLS
+        ai_with_calls = AIMessage(
+            content="",
+            tool_calls=[
+                {"id": "tc-1", "name": "echo_tool", "args": {}},
+                {"id": "tc-2", "name": "echo_tool", "args": {}},
+            ],
+        )
+        state: State = {  # type: ignore[typeddict-item]
+            "messages": [ai_with_calls],
+            "tool_call_count": cap - 1,  # 14 + 2 = 16 > 15
+        }
+        assert nodes_module.should_continue(state) == "error_summary_node"
+
+    def test_should_continue_allows_exactly_at_cap(self) -> None:
+        """count=13 + 2 tool_calls = 15 (== cap). Projected does NOT exceed
+        the cap (`> MAX`, not `>= MAX`), so routing proceeds to tool_node."""
+        cap = nodes_module.MAX_TOOL_CALLS
+        ai_with_calls = AIMessage(
+            content="",
+            tool_calls=[
+                {"id": "tc-1", "name": "echo_tool", "args": {}},
+                {"id": "tc-2", "name": "echo_tool", "args": {}},
+            ],
+        )
+        state: State = {  # type: ignore[typeddict-item]
+            "messages": [ai_with_calls],
+            "tool_call_count": cap - 2,  # 13 + 2 = 15 == cap
+        }
+        assert nodes_module.should_continue(state) == "tool_node"
+
     def test_should_continue_routes_to_error_summary_on_budget(self) -> None:
         ai_with_calls = AIMessage(
             content="",

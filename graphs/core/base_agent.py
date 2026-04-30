@@ -89,8 +89,16 @@ class BaseAgent:
     ) -> AIMessage:
         """Invoke the LLM *without* tools — for graceful-degradation paths
         (e.g. error_summary_node) where the model must produce a final
-        natural-language response."""
-        payload = [{"role": "system", "content": system_prompt}, *messages]
+        natural-language response.
+
+        Still repairs orphan tool_calls: this path is reachable directly
+        from the assistant node when ``should_continue`` routes to
+        error_summary on an exhausted budget — the latest AIMessage may
+        carry unresolved tool_calls that would otherwise trigger a
+        provider-side 400.
+        """
+        repaired = self._ensure_tool_call_pairs(messages)
+        payload = [{"role": "system", "content": system_prompt}, *repaired]
         model = self.model_factory()
         return await self._ainvoke_with_llm_retry(model, payload)
 

@@ -30,7 +30,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, ConfigDict, model_validator
 
 
 class SuccessResponse(BaseModel):
@@ -60,6 +60,15 @@ class ToolFeedback(BaseModel):
     the LLM can see what action the tool actually took (especially useful
     for SQL / search / parameterised tools).
     """
+
+    # extra="forbid": Pydantic v2 default ignores unknown keys, so an
+    # arbitrary tool result like `{"rows": [...]}` would silently parse
+    # into an empty ToolFeedback (all fields None) and crash later when
+    # `_wrap_as_tool_feedback`'s caller accesses `feedback.success.results`.
+    # Forbidding extras converts that into a ValidationError that
+    # `_wrap_as_tool_feedback` catches and routes through the plain-string
+    # success path.
+    model_config = ConfigDict(extra="forbid")
 
     success: Optional[SuccessResponse] = None
     error: Optional[ErrorResponse] = None

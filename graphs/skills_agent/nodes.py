@@ -123,10 +123,18 @@ def should_continue(
     """
     last_message = state["messages"][-1]
     if isinstance(last_message, AIMessage) and last_message.tool_calls:
-        if state.get("tool_call_count", 0) >= MAX_TOOL_CALLS:
+        # Compare the *projected* total against the cap, not just what
+        # has already been executed: the latest AIMessage may carry N
+        # tool_calls that haven't run yet. With current=14 and N=2, the
+        # bare current-count check would still route to tool_node and
+        # let the turn execute 16 calls (cap is 15).
+        projected_count = (
+            state.get("tool_call_count", 0) + len(last_message.tool_calls)
+        )
+        if projected_count > MAX_TOOL_CALLS:
             logger.warning(
-                "tool_call_budget_exhausted count=%d max=%d",
-                state.get("tool_call_count", 0),
+                "tool_call_budget_exhausted projected=%d max=%d",
+                projected_count,
                 MAX_TOOL_CALLS,
             )
             return "error_summary_node"

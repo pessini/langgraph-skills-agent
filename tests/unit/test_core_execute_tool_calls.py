@@ -65,6 +65,20 @@ def raises_runtime_error(query: str) -> str:
     raise RuntimeError(f"boom {query}")
 
 
+@tool
+def returns_arbitrary_dict(query: str) -> dict:
+    """Returns a dict that does NOT match the ToolFeedback schema.
+
+    With Pydantic's default ``extra="ignore"`` this would silently
+    construct an empty ToolFeedback and crash the success branch when
+    accessing ``feedback.success.results``. ``extra="forbid"`` on the
+    model converts the bad parse into a ValidationError that
+    ``_wrap_as_tool_feedback`` catches and routes through the plain-
+    string success path.
+    """
+    return {"rows": [1, 2, 3], "answer": query}
+
+
 def _make_agent(tools: list) -> BaseAgent:
     return BaseAgent(
         agent_name="test",
@@ -110,6 +124,22 @@ class TestReturnShapes:
         assert "answered x" in msg.content
         assert "select 1" in msg.content  # query echoed
         assert out["tool_feedback"].query == "select 1"
+
+    @pytest.mark.asyncio
+    async def test_arbitrary_dict_falls_through_to_string_success(self) -> None:
+        """Regression: dict without 'success'/'error' keys must NOT silently
+        produce an empty ToolFeedback (which would crash on
+        feedback.success.results in the success branch)."""
+        agent = _make_agent([returns_arbitrary_dict])
+        out = await agent.execute_tool_calls(
+            [_tc("returns_arbitrary_dict", {"query": "hi"})], state={}
+        )
+        msg: ToolMessage = out["messages"][0]
+        assert "TOOL_SUCCESS" in msg.content
+        # The dict should be string-wrapped, not unpacked.
+        assert "rows" in msg.content
+        assert out["tool_feedback"].is_success()
+        assert out["tool_feedback"].success.results  # not None
 
     @pytest.mark.asyncio
     async def test_tool_feedback_object_passthrough(self) -> None:

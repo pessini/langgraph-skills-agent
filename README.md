@@ -4,6 +4,14 @@ Demo from the Medium article: [Stop Stuffing Your System Prompt: Build Scalable 
 
 Demonstrates progressive knowledge loading, skill-based domain modularization, and tool-driven skill activation.
 
+> **Note:** This code has evolved beyond the version published with the article. Notable upgrades:
+>
+> - Introduced a reusable async `BaseAgent` (`graphs/core/`) with LLM retry classification (transient vs permanent), tool-call pairing safety, and Langfuse-managed prompts.
+> - Split `skills_agent` into typed state + slim nodes, replacing the original monolithic `utils/nodes.py`.
+> - Stopped vendoring the Aegra runtime — the FastAPI server, persistence, and migrations are now installed via `aegra-cli` at a pinned version, keeping only the graphs and tests in this repo.
+>
+> The Agent Skills concepts in the article still apply; the surrounding implementation has been hardened and simplified.
+
 ## How it runs
 
 This repo is a thin overlay on top of [Aegra](https://github.com/ibbybuilds/aegra) — the FastAPI server, persistence, and migrations are installed via `aegra-cli` (pinned in the `Makefile`). The local code is just:

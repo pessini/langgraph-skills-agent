@@ -1,9 +1,6 @@
 {
-  "dependencies": ["."],
+  "dependencies": ["graphs"],
   "graphs": {
     "skills_agent": "./graphs/skills_agent/agent.py:graph"
-  },
-  "http": {
-    "app": "./custom_routes_example.py:app"
   }
 }

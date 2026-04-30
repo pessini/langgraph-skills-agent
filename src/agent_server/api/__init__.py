@@ -1,1 +1,0 @@
-"""Agent Protocol API endpoints"""

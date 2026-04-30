@@ -34,6 +34,11 @@ from dataclasses import MISSING, dataclass, field, fields
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from langchain_core.language_models import BaseChatModel
+from langchain_ollama import ChatOllama
+from langchain_openai import ChatOpenAI
+
+from core.base_agent import BaseAgent
 from skills_agent.utils.progressive_logging import log_progressive
 
 if TYPE_CHECKING:
@@ -47,6 +52,23 @@ logger = logging.getLogger(__name__)
 def _get_default_skills_dir() -> str:
     """Get the default skills directory relative to this file."""
     return str(Path(__file__).parent / "skills")
+
+
+def _load_chat_model(
+    provider: str, model: str, base_url: str | None = None
+) -> BaseChatModel:
+    """Build a fresh LangChain chat model. Called per agent invocation
+    (these are lightweight HTTP-wrapper objects, not persistent connections).
+
+    OpenAI reads ``OPENAI_API_KEY`` from the environment automatically.
+    """
+    if provider == "ollama":
+        return ChatOllama(model=model, base_url=base_url)
+    if provider == "openai":
+        return ChatOpenAI(model=model)
+    raise ValueError(
+        f"Unsupported provider: {provider}. Use 'ollama' or 'openai'."
+    )
 
 
 @dataclass(kw_only=True)
@@ -149,6 +171,7 @@ class Context:
         # called yet.
         self._skill_store: SkillStore | None = None
         self._tools: list[BaseTool] | None = None
+        self._agent: SkillsAgent | None = None
 
     @property
     def model(self) -> str:
@@ -171,7 +194,7 @@ class Context:
            ``read_skill_file``) that get bound to the LLM via ``bind_tools()``.
         """
         from skills_agent.skills import SkillStore
-        from skills_agent.utils.tools import create_skill_tools
+        from skills_agent.tools import create_skill_tools
 
         if self._skill_store is None:
             scan_start = time.perf_counter()
@@ -198,6 +221,17 @@ class Context:
                 "summary": f"count={len(self._tools)}",
             })
 
+        if self._agent is None:
+            # The model_factory closure captures `self` so each call
+            # builds a fresh model with the latest provider/model values.
+            self._agent = SkillsAgent(
+                agent_name="skills_agent",
+                model_factory=lambda: _load_chat_model(
+                    self.provider, self.model, self.base_url
+                ),
+                tools=self._tools,
+            )
+
     @property
     def skill_store(self) -> SkillStore:
         """Access the initialized skill store."""
@@ -215,3 +249,24 @@ class Context:
                 "Context not initialized. Call await context.initialize() first."
             )
         return self._tools
+
+    @property
+    def agent(self) -> SkillsAgent:
+        """Access the cached SkillsAgent instance."""
+        if self._agent is None:
+            raise RuntimeError(
+                "Context not initialized. Call await context.initialize() first."
+            )
+        return self._agent
+
+
+class SkillsAgent(BaseAgent):
+    """Skills-agent specialization of ``BaseAgent``.
+
+    Forwards tool execution events to ``progressive_logging`` so the
+    existing log shape is preserved (the BaseAgent itself is logging-
+    agnostic).
+    """
+
+    def on_tool_event(self, event: dict) -> None:
+        log_progressive(event)

@@ -1,6 +1,9 @@
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["graphs", "src"]
 
 [project]
 name = "aegra"
@@ -47,6 +50,7 @@ dependencies = [
     "pydantic-settings>=2.12.0",
     "langchain-mcp-adapters>=0.1.0",
     "httpx>=0.28.0",
+    "langgraph-prebuilt<1.0.5",
 ]
 
 [project.urls]
@@ -57,12 +61,6 @@ Documentation = "https://github.com/ibbybuilds/aegra#readme"
 "Feature Requests" = "https://github.com/ibbybuilds/aegra/issues"
 
 
-
-[tool.hatch.build.targets.wheel]
-packages = ["src/agent_server"]
-
-[tool.hatch.build.targets.wheel.sources]
-"graphs/skills_agent" = "skills_agent"
 
 [tool.ruff]
 line-length = 88

@@ -1,3 +1,5 @@
+# Runtime is provided by aegra-cli (installed via the Makefile, latest by default).
+# Last verified against aegra-cli 0.7.2.
 [project]
 name = "langgraph-skills-agent"
 version = "0.1.0"

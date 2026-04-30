@@ -8,22 +8,22 @@ Demonstrates progressive knowledge loading, skill-based domain modularization, a
 >
 > - Introduced a reusable async `BaseAgent` (`graphs/core/`) with LLM retry classification (transient vs permanent), tool-call pairing safety, and Langfuse-managed prompts.
 > - Split `skills_agent` into typed state + slim nodes, replacing the original monolithic `utils/nodes.py`.
-> - Stopped vendoring the Aegra runtime — the FastAPI server, persistence, and migrations are now installed via `aegra-cli` at a pinned version, keeping only the graphs and tests in this repo.
+> - Stopped vendoring the Aegra runtime — the FastAPI server, persistence, and migrations are now installed via `aegra-cli`, keeping only the graphs and tests in this repo.
 >
 > The Agent Skills concepts in the article still apply; the surrounding implementation has been hardened and simplified.
 
 ## How it runs
 
-This repo is a thin overlay on top of [Aegra](https://github.com/ibbybuilds/aegra) — the FastAPI server, persistence, and migrations are installed via `aegra-cli` (pinned in the `Makefile`). The local code is just:
+This repo is a thin overlay on top of [Aegra](https://github.com/ibbybuilds/aegra) — the FastAPI server, persistence, and migrations are installed via `aegra-cli`. The local code is just:
 
-```
+```text
 aegra.json          # graph registration
 graphs/core/        # reusable BaseAgent
 graphs/skills_agent/ # the demo agent + skills
 tests/              # unit tests for graphs/
 ```
 
-To upgrade Aegra: bump `AEGRA_CLI_VERSION` in the `Makefile` and run `make install`. Don't vendor upstream source here — patch upstream and bump the pin instead.
+`make install` pulls the latest `aegra-cli`. The repo was last verified against `0.7.2` (see the comment in `pyproject.toml`). Don't vendor upstream source here — patch upstream and re-run `make install` instead.
 
 ## Quick start
 

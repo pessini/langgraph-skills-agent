@@ -1,26 +1,8 @@
-[build-system]
-requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.build_meta"
-
 [project]
 name = "langgraph-skills-agent"
 version = "0.1.0"
-description = "Aegra-overlay agent demonstrating progressive Agent Skills in LangGraph."
-readme = "README.md"
+description = "Demo agent for the Medium article on progressive Agent Skills in LangGraph."
 requires-python = ">=3.11"
-license = { text = "Apache-2.0" }
-authors = [
-    { name = "Leandro Pessini", email = "pessini.leandro@gmail.com" }
-]
-keywords = ["langgraph", "agent-skills", "ai-agents", "aegra"]
-classifiers = [
-    "Development Status :: 3 - Alpha",
-    "Intended Audience :: Developers",
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Topic :: Scientific/Engineering :: Artificial Intelligence",
-]
 dependencies = [
     "langgraph>=1.0.3",
     "langchain>=1.0.8",
@@ -31,46 +13,18 @@ dependencies = [
     "pydantic>=2.11.7",
     "structlog>=25.4.0",
     "python-dotenv>=1.1.1",
-    "httpx>=0.28.0",
 ]
-
-[project.urls]
-Homepage = "https://github.com/pessini/langgraph-skills-agent"
-"Aegra runtime" = "https://github.com/ibbybuilds/aegra"
-
-[tool.setuptools.packages.find]
-where = ["graphs"]
 
 [dependency-groups]
 dev = [
     "pytest>=8.4.1",
     "pytest-asyncio>=1.1.0",
-    "pytest-cov>=6.2.1",
-    "ruff>=0.8.4",
 ]
 
-[tool.ruff]
-line-length = 88
-target-version = "py311"
-
-[tool.ruff.lint]
-select = ["E", "W", "F", "I", "B", "C4", "UP", "SIM"]
-ignore = ["E501", "B008", "UP007"]
-
-[tool.ruff.lint.per-file-ignores]
-"tests/**/*.py" = ["ARG", "S101"]
-
-[tool.ruff.format]
-quote-style = "double"
-indent-style = "space"
+[tool.uv]
+package = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-python_files = ["test_*.py"]
-python_classes = ["Test*"]
-python_functions = ["test_*"]
-addopts = "-v --tb=short --strict-markers"
 asyncio_mode = "auto"
-markers = [
-    "unit: Unit tests (fast, no external dependencies)",
-]
+markers = ["unit: fast, isolated unit tests"]

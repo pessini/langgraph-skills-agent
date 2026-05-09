@@ -95,12 +95,19 @@ async def _load_external_mcp_tools() -> list["BaseTool"]:
     # don't pay the import cost.
     from langchain_mcp_adapters.client import MultiServerMCPClient  # noqa: PLC0415
 
-    client = MultiServerMCPClient(connections)
+    # Prefix tool names with their server name when more than one server
+    # is configured so two servers exposing common names like ``search``
+    # / ``list`` can coexist (e.g. ``salesdb_search`` vs.
+    # ``support_search``).  For the single-server case we keep names
+    # bare since intra-server collisions are impossible by spec.
+    use_prefix = len(connections) > 1
+    client = MultiServerMCPClient(connections, tool_name_prefix=use_prefix)
     tools = await client.get_tools()
     logger.info(
-        "Loaded %d external MCP tools from %d server(s): %s",
+        "Loaded %d external MCP tools from %d server(s) (prefix=%s): %s",
         len(tools),
         len(connections),
+        use_prefix,
         list(connections.keys()),
     )
     log_progressive({

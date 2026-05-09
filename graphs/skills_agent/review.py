@@ -140,18 +140,27 @@ def create_review_tool() -> BaseTool:
         raw_decision = interrupt(request)
         if not isinstance(raw_decision, dict):
             raise ValueError("Review decision must be a JSON object")
+        # On resume LangGraph re-runs this node from the top, so the local
+        # ``request_id`` is freshly generated and no longer matches the
+        # one the UI saw.  Require the host to echo the original
+        # request_id back in the resume payload — that is the only ID
+        # that ever appeared in front of a human, and downstream audit /
+        # correlation logic depends on it.  Falling back to the local
+        # value would emit a fresh UUID that was never displayed.
+        echoed_id = raw_decision.get("request_id")
+        if not isinstance(echoed_id, str) or not echoed_id:
+            raise ValueError(
+                "Review decision must include a non-empty string "
+                "'request_id' echoed from the original interrupt payload"
+            )
         allowed_values = {opt["value"] for opt in options}
         if raw_decision.get("value") not in allowed_values:
             raise ValueError(
                 f"Review decision value {raw_decision.get('value')!r} is not "
                 f"one of the supplied options {sorted(allowed_values)}"
             )
-        # On resume LangGraph re-runs this node from the top, so the local
-        # ``request_id`` is freshly generated and no longer matches the one
-        # the UI saw.  The host-supplied request_id in the resume payload is
-        # the authoritative correlation key; preserve it.
         decision: ReviewDecision = {
-            "request_id": raw_decision.get("request_id", request_id),
+            "request_id": echoed_id,
             "value": raw_decision["value"],
             "note": raw_decision.get("note"),
         }

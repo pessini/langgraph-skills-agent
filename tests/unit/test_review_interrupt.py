@@ -185,6 +185,78 @@ async def test_interrupt_propagates_through_base_agent() -> None:
 
 
 @pytest.mark.unit
+async def test_batch_with_pausing_tool_is_refused() -> None:
+    """``BaseAgent.execute_tool_calls`` must refuse a multi-tool batch that
+    mixes ``request_human_review`` with siblings.
+
+    LangGraph replays the entire node on resume, so any sibling tool that
+    already ran before the interrupt would execute again — duplicating
+    non-idempotent side effects.  The wrapper enforces the contract by
+    emitting a ``BATCH_REJECTED`` ``TOOL_ERROR`` for each tool_call so
+    the AIMessage<->ToolMessage pairing invariant is preserved and the
+    LLM gets clear feedback to retry alone.
+    """
+    from langchain_core.tools import tool as _tool
+
+    review_tool = create_review_tool()
+
+    side_effects: list[str] = []
+
+    @_tool
+    def writes_to_db(query: str) -> str:
+        """Simulates a non-idempotent side effect."""
+        side_effects.append(query)
+        return f"wrote {query}"
+
+    agent = BaseAgent(
+        agent_name="test-batch-refusal",
+        model_factory=lambda: pytest.fail("model_factory must not run"),
+        tools=[review_tool, writes_to_db],
+        max_invoke_retries=0,
+    )
+
+    options = json.dumps(
+        [{"value": "approve", "label": "Approve", "variant": "default"}]
+    )
+    out = await agent.execute_tool_calls(
+        [
+            {
+                "id": "tc-1",
+                "name": "writes_to_db",
+                "args": {"query": "row-42"},
+            },
+            {
+                "id": "tc-2",
+                "name": "request_human_review",
+                "args": {
+                    "title": "Test",
+                    "summary": "Pretend.",
+                    "options_json": options,
+                    "payload_json": "{}",
+                },
+            },
+        ],
+        state={},
+    )
+
+    assert side_effects == [], (
+        "writes_to_db must NOT have run — the batch should be rejected "
+        "before any tool fires"
+    )
+
+    assert len(out["messages"]) == 2, "one ToolMessage per tool_call required"
+    for msg in out["messages"]:
+        assert "TOOL_ERROR" in msg.content
+        assert "BATCH_REJECTED" in msg.content
+        assert "request_human_review" in msg.content
+        assert "must be called alone" in msg.content
+
+    assert out["tool_feedback"].is_error()
+    assert out["tool_feedback"].error.error_type == "BATCH_REJECTED"
+    assert out["tool_feedback"].error.retryable is True
+
+
+@pytest.mark.unit
 def test_request_human_review_signature() -> None:
     """The tool exposes a stable signature the SKILL.md can rely on."""
     review_tool = create_review_tool()

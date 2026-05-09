@@ -127,6 +127,67 @@ class BaseAgent:
         latest_feedback: Optional[ToolFeedback] = None
         new_retry_attempts = retry_attempts
 
+        # Refuse a multi-tool batch that mixes a pause-capable tool with
+        # siblings.  LangGraph replays the entire node on resume, so
+        # whatever sibling tools fired before the interrupt would execute
+        # again and duplicate non-idempotent side effects (DB writes,
+        # external API calls, emails).  Surface a clear TOOL_ERROR for
+        # each tool_call so the LLM retries by calling the pausing tool
+        # alone — the AIMessage<->ToolMessage pairing invariant is held
+        # by emitting one ToolMessage per call.
+        if len(tool_calls) > 1:
+            pausing = [
+                tc for tc in tool_calls if self._tool_pauses_graph(tc)
+            ]
+            if pausing:
+                pausing_names = sorted({
+                    tc.get("name") if isinstance(tc, dict)
+                    else getattr(tc, "name", "")
+                    for tc in pausing
+                })
+                refusal = (
+                    "TOOL_ERROR attempt=0 type=BATCH_REJECTED "
+                    "retryable=true\n"
+                    f"message: pause-capable tool(s) {pausing_names} "
+                    "must be called alone in a turn; LangGraph replays "
+                    "the node from the top on resume, so any sibling "
+                    "tools that already ran would execute again. "
+                    "Re-emit the pause-capable tool as the only "
+                    "tool_call in its AIMessage.\n"
+                    f"context: batch contained {len(tool_calls)} "
+                    "tool_calls"
+                )
+                refusal_messages: list[ToolMessage] = []
+                for tc in tool_calls:
+                    tc_id = self._extract_tool_call_id(tc)
+                    if tc_id is None:
+                        continue
+                    refusal_messages.append(
+                        ToolMessage(content=refusal, tool_call_id=tc_id)
+                    )
+                refusal_feedback = ToolFeedback(
+                    error=ErrorResponse(
+                        error_type="BATCH_REJECTED",
+                        message=(
+                            f"pause-capable tool(s) {pausing_names} "
+                            "must be called alone"
+                        ),
+                        retryable=True,
+                        context=(
+                            f"batch contained {len(tool_calls)} tool_calls"
+                        ),
+                    )
+                )
+                history.append(refusal_feedback)
+                return {
+                    "messages": refusal_messages,
+                    "tool_feedback": refusal_feedback,
+                    "tool_feedback_history": history,
+                    "tool_retry_attempts": min(
+                        retry_attempts + 1, self.max_tool_retries
+                    ),
+                }
+
         for tc in tool_calls:
             tool_call_id = self._extract_tool_call_id(tc)
             if tool_call_id is None:
@@ -268,6 +329,23 @@ class BaseAgent:
     # ------------------------------------------------------------------
     # Internal: single-tool execution
     # ------------------------------------------------------------------
+
+    def _tool_pauses_graph(self, tc: Union[dict[str, Any], Any]) -> bool:
+        """True iff ``tc`` names a tool flagged ``pauses_graph`` in metadata.
+
+        Tools that call ``langgraph.types.interrupt`` (or otherwise raise
+        ``GraphBubbleUp``) opt in by setting ``metadata={"pauses_graph":
+        True}`` on themselves.  ``execute_tool_calls`` consults this
+        before executing a multi-tool batch so a pausing tool can't be
+        silently mixed with siblings whose side effects would replay on
+        resume.
+        """
+        name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None)
+        tool = self.tools_by_name.get(name) if name else None
+        if tool is None:
+            return False
+        metadata = getattr(tool, "metadata", None) or {}
+        return bool(metadata.get("pauses_graph"))
 
     async def _execute_single_tool(
         self,

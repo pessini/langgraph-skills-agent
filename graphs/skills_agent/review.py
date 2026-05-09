@@ -75,6 +75,16 @@ def create_review_tool() -> BaseTool:
         human-in-the-loop confirmation.  Calling this tool pauses the graph;
         the agent does not continue until a human responds via the UI.
 
+        IMPORTANT — call alone in a turn.  This tool MUST be the only
+        ``tool_call`` in its ``AIMessage``.  ``BaseAgent`` rejects any
+        batch that mixes it with sibling tool calls (returning
+        ``TOOL_ERROR`` for each) because LangGraph replays the node from
+        the top on resume — any sibling tool that already ran would
+        execute again, duplicating non-idempotent side effects (writes,
+        external API calls, emails).  If you need to gather context
+        before requesting review, do it in an earlier turn and let the
+        review be its own turn.
+
         Args:
             title: Short label for the review card (e.g. "Anomaly review").
             summary: Human-readable paragraph explaining what needs review.
@@ -147,4 +157,9 @@ def create_review_tool() -> BaseTool:
         }
         return json.dumps(decision)
 
+    # Mark the tool as pause-capable so ``BaseAgent.execute_tool_calls``
+    # can detect a multi-tool batch that mixes it with siblings and
+    # refuse the batch before any side effects fire (LangGraph replays
+    # the node from the top on resume — sibling tools would duplicate).
+    request_human_review.metadata = {"pauses_graph": True}
     return request_human_review  # type: ignore[return-value]

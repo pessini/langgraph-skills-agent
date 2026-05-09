@@ -1,4 +1,5 @@
-"""Graph nodes for the skills agent.
+"""
+Graph nodes for the skills agent.
 
 The ReAct mechanism (LLM retry, orphan tool_call repair, ToolFeedback
 auto-wrapping, InjectedState injection, previous_errors self-correction)
@@ -13,7 +14,9 @@ lives in ``core.BaseAgent``. This file is the thin policy layer:
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
+from functools import wraps
 from typing import Literal
 
 from langchain_core.messages import AIMessage
@@ -24,6 +27,46 @@ from skills_agent.prompts import SYSTEM_PROMPT
 from skills_agent.state import State
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Per-request Context initialization
+# ---------------------------------------------------------------------------
+#
+# Aegra (and any LangGraph platform host) instantiates a fresh ``Context``
+# per request, with ``_skill_store`` / ``_tools`` / ``_agent`` all None
+# until ``await ctx.initialize()`` runs. The first node entered must do
+# that init.
+#
+# We previously relied on "agent_node always runs first" — true for the
+# normal __start__ path, FALSE for resume-from-interrupt: when the user
+# resolves a ``request_human_review`` interrupt, the graph re-enters at
+# ``tool_node`` with a brand-new uninitialized Context and ``ctx.agent``
+# raises ``RuntimeError("Context not initialized")``. Aegra marks the run
+# errored and the HITL flow breaks silently from the user's perspective.
+#
+# The decorator below makes initialization a structural property of every
+# graph node rather than something each node author has to remember.
+
+NodeFn = Callable[[State, Runtime[Context]], Awaitable[dict]]
+
+
+def with_context_init(node_fn: NodeFn) -> NodeFn:
+    """Decorator: ensure ``runtime.context`` is initialized before the node body.
+
+    Idempotent — re-entry within the same request reuses the cached
+    skill store, tool list, and SkillsAgent. Wrap every graph node so
+    no entry path (start, resume, replay) can land on a fresh Context.
+    """
+
+    @wraps(node_fn)
+    async def wrapper(state: State, runtime: Runtime[Context]) -> dict:
+        ctx = runtime.context
+        if ctx._skill_store is None:
+            await ctx.initialize()
+        return await node_fn(state, runtime)
+
+    return wrapper
 
 # Skills-agent policy: hard cap on cumulative tool calls within a single
 # human turn (the counter is reset by BaseAgent.with_turn_reset on each
@@ -48,13 +91,16 @@ ERROR_SUMMARY_SYSTEM_PROMPT = (
 )
 
 
+@with_context_init
 async def agent_node(state: State, runtime: Runtime[Context]) -> dict:
-    """Invoke the LLM with tools bound — the "Reasoning" half of ReAct.
+    """
+    Invoke the LLM with tools bound — the "Reasoning" half of ReAct.
 
-    Lazily initializes the ``Context`` (skills scan + tools + agent build)
-    on the first call. Renders the system prompt with the current UTC
-    time and the skill catalog, then delegates to ``BaseAgent.call_llm``
-    which handles orphan tool_call repair and transient-error retry.
+    The ``@with_context_init`` decorator guarantees the per-request
+    ``Context`` is initialized before this body runs. Renders the system
+    prompt with the current UTC time and the skill catalog, then delegates
+    to ``BaseAgent.call_llm`` which handles orphan tool_call repair and
+    transient-error retry.
 
     On a fresh human turn (last persisted message is a HumanMessage), the
     per-turn counters (``tool_retry_attempts``, ``tool_feedback``,
@@ -62,10 +108,7 @@ async def agent_node(state: State, runtime: Runtime[Context]) -> dict:
     after a previous failure.
     """
     ctx = runtime.context
-    if ctx._skill_store is None:
-        await ctx.initialize()
     agent = ctx.agent
-
     is_new = agent.is_new_human_turn(state["messages"])
     system_prompt = SYSTEM_PROMPT.format(
         current_time=datetime.now(tz=UTC).isoformat(),
@@ -78,8 +121,10 @@ async def agent_node(state: State, runtime: Runtime[Context]) -> dict:
     )
 
 
+@with_context_init
 async def tool_node(state: State, runtime: Runtime[Context]) -> dict:
-    """Execute tool calls from the latest AIMessage — the "Acting" half.
+    """
+    Execute tool calls from the latest AIMessage — the "Acting" half.
 
     Delegates to ``BaseAgent.execute_tool_calls_safe`` which guarantees
     that every tool_call gets a paired ToolMessage even on catastrophic
@@ -97,8 +142,10 @@ async def tool_node(state: State, runtime: Runtime[Context]) -> dict:
     return update
 
 
+@with_context_init
 async def error_summary_node(state: State, runtime: Runtime[Context]) -> dict:
-    """Graceful-degradation node: produce a plain-text failure summary.
+    """
+    Graceful-degradation node: produce a plain-text failure summary.
 
     Reached when ``should_continue`` detects either the tool-call budget
     or the retry budget is exhausted. The LLM is invoked without tools
@@ -114,7 +161,8 @@ async def error_summary_node(state: State, runtime: Runtime[Context]) -> dict:
 def should_continue(
     state: State,
 ) -> Literal["tool_node", "error_summary_node", "__end__"]:
-    """Route after agent_node.
+    """
+    Route after agent_node.
 
     - tool call budget exhausted → error_summary_node
     - retry budget exhausted     → error_summary_node
@@ -128,9 +176,7 @@ def should_continue(
         # tool_calls that haven't run yet. With current=14 and N=2, the
         # bare current-count check would still route to tool_node and
         # let the turn execute 16 calls (cap is 15).
-        projected_count = (
-            state.get("tool_call_count", 0) + len(last_message.tool_calls)
-        )
+        projected_count = state.get("tool_call_count", 0) + len(last_message.tool_calls)
         if projected_count > MAX_TOOL_CALLS:
             logger.warning(
                 "tool_call_budget_exhausted projected=%d max=%d",

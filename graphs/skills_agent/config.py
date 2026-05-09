@@ -23,10 +23,17 @@ Responsibilities:
 
 4. **Caching** — once initialized, the skill store and tools list are cached
    for the lifetime of the Context instance.
+
+5. **External MCP tool composition** — when ``EXTERNAL_MCP_SERVERS_JSON`` is
+   set in the environment, ``initialize()`` connects to those MCP servers via
+   ``langchain-mcp-adapters`` and merges their tools into the agent's tool
+   list.  This is how domain-specific tool servers (e.g. a sales database
+   server) plug in without modifying the agent's source.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -47,6 +54,69 @@ if TYPE_CHECKING:
     from skills_agent.skills import SkillStore
 
 logger = logging.getLogger(__name__)
+
+
+async def _load_external_mcp_tools() -> list["BaseTool"]:
+    """Load tools from external MCP servers declared in the environment.
+
+    Reads ``EXTERNAL_MCP_SERVERS_JSON`` — a JSON object mapping
+    server-name → connection-config.  Example:
+
+    .. code-block:: bash
+
+        EXTERNAL_MCP_SERVERS_JSON='{"sales_db": {"url":
+        "http://localhost:8765/mcp", "transport": "streamable_http"}}'
+
+    Returns an empty list if the env var is unset, empty, or invalid JSON.
+    Connection failures from individual servers propagate — boot fails
+    loudly rather than silently shipping a broken tool list.
+    """
+    raw = os.environ.get("EXTERNAL_MCP_SERVERS_JSON", "").strip()
+    if not raw:
+        return []
+    try:
+        connections = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        logger.warning(
+            "EXTERNAL_MCP_SERVERS_JSON is not valid JSON; ignoring (%s)", exc
+        )
+        return []
+    if not isinstance(connections, dict):
+        logger.warning(
+            "EXTERNAL_MCP_SERVERS_JSON must be a JSON object mapping server "
+            "name to connection config; got %s. Ignoring.",
+            type(connections).__name__,
+        )
+        return []
+    if not connections:
+        return []
+
+    # Imported lazily so test suites that don't exercise external MCP
+    # don't pay the import cost.
+    from langchain_mcp_adapters.client import MultiServerMCPClient  # noqa: PLC0415
+
+    # Prefix tool names with their server name when more than one server
+    # is configured so two servers exposing common names like ``search``
+    # / ``list`` can coexist (e.g. ``salesdb_search`` vs.
+    # ``support_search``).  For the single-server case we keep names
+    # bare since intra-server collisions are impossible by spec.
+    use_prefix = len(connections) > 1
+    client = MultiServerMCPClient(connections, tool_name_prefix=use_prefix)
+    tools = await client.get_tools()
+    logger.info(
+        "Loaded %d external MCP tools from %d server(s) (prefix=%s): %s",
+        len(tools),
+        len(connections),
+        use_prefix,
+        list(connections.keys()),
+    )
+    log_progressive({
+        "event": "external_mcp.tools.loaded",
+        "summary": (
+            f"servers={list(connections.keys())} count={len(tools)}"
+        ),
+    })
+    return tools
 
 
 def _get_default_skills_dir() -> str:
@@ -214,11 +284,47 @@ class Context:
             })
 
         if self._tools is None:
-            self._tools = create_skill_tools(self._skill_store)
-            logger.info("Created %d skill tools", len(self._tools))
+            from skills_agent.review import create_review_tool  # noqa: PLC0415
+
+            skill_tools = create_skill_tools(self._skill_store)
+            review_tool = create_review_tool()
+            external_tools = await _load_external_mcp_tools()
+
+            # ``BaseAgent.tools_by_name`` is dict-keyed by name, so a later
+            # tool with a duplicate name silently overrides an earlier one.
+            # Drop external tools that collide with built-ins OR with an
+            # already-kept external (two MCP servers exposing the same
+            # tool name) so neither path can silently shadow another.
+            seen_names = {t.name for t in [*skill_tools, review_tool]}
+            kept_external: list[BaseTool] = []
+            dropped: list[str] = []
+            for ext in external_tools:
+                if ext.name in seen_names:
+                    dropped.append(ext.name)
+                    continue
+                seen_names.add(ext.name)
+                kept_external.append(ext)
+            if dropped:
+                logger.warning(
+                    "Dropped %d external MCP tool(s) whose names collide "
+                    "with a built-in or another external tool: %s",
+                    len(dropped),
+                    sorted(set(dropped)),
+                )
+
+            self._tools = [*skill_tools, review_tool, *kept_external]
+            logger.info(
+                "Created %d total tools (%d skill, 1 review, %d external)",
+                len(self._tools),
+                len(skill_tools),
+                len(kept_external),
+            )
             log_progressive({
                 "event": "tools.created",
-                "summary": f"count={len(self._tools)}",
+                "summary": (
+                    f"total={len(self._tools)} skill={len(skill_tools)} "
+                    f"review=1 external={len(kept_external)}"
+                ),
             })
 
         if self._agent is None:

@@ -2,7 +2,7 @@
 # Last verified against aegra-cli 0.7.2.
 [project]
 name = "langgraph-skills-agent"
-version = "0.1.0"
+version = "0.2.0"
 description = "Demo agent for the Medium article on progressive Agent Skills in LangGraph."
 requires-python = ">=3.11"
 dependencies = [

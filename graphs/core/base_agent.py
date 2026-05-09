@@ -29,6 +29,7 @@ from typing import Any, Callable, Optional, Union
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.tools import BaseTool
+from langgraph.errors import GraphBubbleUp
 from langgraph.prebuilt import InjectedState
 from pydantic import ValidationError
 
@@ -126,6 +127,67 @@ class BaseAgent:
         latest_feedback: Optional[ToolFeedback] = None
         new_retry_attempts = retry_attempts
 
+        # Refuse a multi-tool batch that mixes a pause-capable tool with
+        # siblings.  LangGraph replays the entire node on resume, so
+        # whatever sibling tools fired before the interrupt would execute
+        # again and duplicate non-idempotent side effects (DB writes,
+        # external API calls, emails).  Surface a clear TOOL_ERROR for
+        # each tool_call so the LLM retries by calling the pausing tool
+        # alone — the AIMessage<->ToolMessage pairing invariant is held
+        # by emitting one ToolMessage per call.
+        if len(tool_calls) > 1:
+            pausing = [
+                tc for tc in tool_calls if self._tool_pauses_graph(tc)
+            ]
+            if pausing:
+                pausing_names = sorted({
+                    tc.get("name") if isinstance(tc, dict)
+                    else getattr(tc, "name", "")
+                    for tc in pausing
+                })
+                refusal = (
+                    "TOOL_ERROR attempt=0 type=BATCH_REJECTED "
+                    "retryable=true\n"
+                    f"message: pause-capable tool(s) {pausing_names} "
+                    "must be called alone in a turn; LangGraph replays "
+                    "the node from the top on resume, so any sibling "
+                    "tools that already ran would execute again. "
+                    "Re-emit the pause-capable tool as the only "
+                    "tool_call in its AIMessage.\n"
+                    f"context: batch contained {len(tool_calls)} "
+                    "tool_calls"
+                )
+                refusal_messages: list[ToolMessage] = []
+                for tc in tool_calls:
+                    tc_id = self._extract_tool_call_id(tc)
+                    if tc_id is None:
+                        continue
+                    refusal_messages.append(
+                        ToolMessage(content=refusal, tool_call_id=tc_id)
+                    )
+                refusal_feedback = ToolFeedback(
+                    error=ErrorResponse(
+                        error_type="BATCH_REJECTED",
+                        message=(
+                            f"pause-capable tool(s) {pausing_names} "
+                            "must be called alone"
+                        ),
+                        retryable=True,
+                        context=(
+                            f"batch contained {len(tool_calls)} tool_calls"
+                        ),
+                    )
+                )
+                history.append(refusal_feedback)
+                return {
+                    "messages": refusal_messages,
+                    "tool_feedback": refusal_feedback,
+                    "tool_feedback_history": history,
+                    "tool_retry_attempts": min(
+                        retry_attempts + 1, self.max_tool_retries
+                    ),
+                }
+
         for tc in tool_calls:
             tool_call_id = self._extract_tool_call_id(tc)
             if tool_call_id is None:
@@ -139,6 +201,10 @@ class BaseAgent:
                 feedback = await self._execute_single_tool(
                     tc, state, previous_errors_str
                 )
+            except GraphBubbleUp:
+                # LangGraph signals interrupt() / Command-routed control flow
+                # by raising. Must propagate, never wrap as TOOL_ERROR.
+                raise
             except Exception as e:
                 # Should not normally fire — _execute_single_tool catches
                 # tool-side exceptions itself. This is a defensive net for
@@ -204,6 +270,8 @@ class BaseAgent:
         """
         try:
             return await self.execute_tool_calls(tool_calls, state)
+        except GraphBubbleUp:
+            raise
         except Exception as e:
             logger.exception(
                 "execute_tool_calls_catastrophic agent=%s", self.agent_name
@@ -261,6 +329,23 @@ class BaseAgent:
     # ------------------------------------------------------------------
     # Internal: single-tool execution
     # ------------------------------------------------------------------
+
+    def _tool_pauses_graph(self, tc: Union[dict[str, Any], Any]) -> bool:
+        """True iff ``tc`` names a tool flagged ``pauses_graph`` in metadata.
+
+        Tools that call ``langgraph.types.interrupt`` (or otherwise raise
+        ``GraphBubbleUp``) opt in by setting ``metadata={"pauses_graph":
+        True}`` on themselves.  ``execute_tool_calls`` consults this
+        before executing a multi-tool batch so a pausing tool can't be
+        silently mixed with siblings whose side effects would replay on
+        resume.
+        """
+        name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None)
+        tool = self.tools_by_name.get(name) if name else None
+        if tool is None:
+            return False
+        metadata = getattr(tool, "metadata", None) or {}
+        return bool(metadata.get("pauses_graph"))
 
     async def _execute_single_tool(
         self,
@@ -325,6 +410,31 @@ class BaseAgent:
                 }
             )
             return feedback
+        except GraphBubbleUp:
+            # interrupt()/Command propagation: not a tool failure.
+            # If the tool raised this without declaring itself
+            # pause-capable in its metadata, the upstream batch-refusal
+            # guard in execute_tool_calls did not protect siblings — log
+            # loudly so the tool author sees the contract violation
+            # during development.  We can't *prevent* the resulting
+            # side-effect duplication on resume from here (siblings have
+            # already run), but a noisy warning is cheap and catches
+            # the bug at the earliest possible moment.
+            metadata = getattr(tool_func, "metadata", None) or {}
+            if not metadata.get("pauses_graph"):
+                logger.warning(
+                    "undeclared_pausing_tool agent=%s tool=%s id=%s — tool "
+                    "raised GraphBubbleUp but its metadata does not declare "
+                    "pauses_graph=True. Set metadata={'pauses_graph': True} "
+                    "on the tool so BaseAgent.execute_tool_calls can refuse "
+                    "multi-tool batches that mix it with siblings (otherwise "
+                    "earlier sibling tools' side effects will duplicate on "
+                    "resume).",
+                    self.agent_name,
+                    name,
+                    tool_call_id,
+                )
+            raise
         except Exception as e:
             logger.exception(
                 "tool_execution_failed agent=%s tool=%s id=%s",
@@ -423,6 +533,8 @@ class BaseAgent:
         for attempt in range(self.max_invoke_retries + 1):
             try:
                 return await tool.ainvoke(args)
+            except GraphBubbleUp:
+                raise
             except Exception as e:
                 last_error = e
                 if attempt < self.max_invoke_retries and self._is_retryable_error(e):

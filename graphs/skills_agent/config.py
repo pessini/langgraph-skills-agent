@@ -81,6 +81,13 @@ async def _load_external_mcp_tools() -> list["BaseTool"]:
             "EXTERNAL_MCP_SERVERS_JSON is not valid JSON; ignoring (%s)", exc
         )
         return []
+    if not isinstance(connections, dict):
+        logger.warning(
+            "EXTERNAL_MCP_SERVERS_JSON must be a JSON object mapping server "
+            "name to connection config; got %s. Ignoring.",
+            type(connections).__name__,
+        )
+        return []
     if not connections:
         return []
 

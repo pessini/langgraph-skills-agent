@@ -105,7 +105,28 @@ def create_review_tool() -> BaseTool:
         # interrupt() pauses the graph and surfaces ``request`` in the
         # snapshot's interrupts list; the resume value is whatever the
         # caller passes to ``Command(resume=...)``.
-        decision: ReviewDecision = interrupt(request)
+        raw_decision = interrupt(request)
+        if not isinstance(raw_decision, dict):
+            raise ValueError("Review decision must be a JSON object")
+        allowed_values = {
+            opt["value"]
+            for opt in options
+            if isinstance(opt, dict) and "value" in opt
+        }
+        if raw_decision.get("value") not in allowed_values:
+            raise ValueError(
+                f"Review decision value {raw_decision.get('value')!r} is not "
+                f"one of the supplied options {sorted(allowed_values)}"
+            )
+        # On resume LangGraph re-runs this node from the top, so the local
+        # ``request_id`` is freshly generated and no longer matches the one
+        # the UI saw.  The host-supplied request_id in the resume payload is
+        # the authoritative correlation key; preserve it.
+        decision: ReviewDecision = {
+            "request_id": raw_decision.get("request_id", request_id),
+            "value": raw_decision["value"],
+            "note": raw_decision.get("note"),
+        }
         return json.dumps(decision)
 
     return request_human_review  # type: ignore[return-value]

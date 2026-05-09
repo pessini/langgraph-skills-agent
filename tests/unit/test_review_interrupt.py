@@ -119,6 +119,7 @@ async def test_payload_json_defaults_to_empty_dict() -> None:
 
     snapshot = await graph.aget_state(config)
     interrupts = [iv for task in snapshot.tasks for iv in task.interrupts]
+    assert len(interrupts) == 1, f"expected 1 interrupt, got {len(interrupts)}"
     assert interrupts[0].value["payload"] == {}
 
 

@@ -257,6 +257,82 @@ async def test_batch_with_pausing_tool_is_refused() -> None:
 
 
 @pytest.mark.unit
+async def test_undeclared_pausing_tool_logs_contract_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A tool that raises ``GraphBubbleUp`` without declaring
+    ``metadata={"pauses_graph": True}`` is a contract violation: the
+    upstream batch-refusal guard cannot detect it, so any sibling tools
+    in the batch already ran and their side effects will duplicate on
+    resume.  ``BaseAgent`` cannot prevent this from happening, but it
+    must surface the violation as a loud ``logger.warning`` so the tool
+    author sees it during development.
+    """
+    from langchain_core.tools import tool as _tool
+    from langgraph.types import interrupt as _interrupt
+
+    @_tool
+    def secretly_pauses(query: str) -> str:
+        """Calls interrupt() but forgets to declare pauses_graph=True."""
+        return _interrupt({"q": query})  # type: ignore[no-any-return]
+
+    # Sanity: the tool truly does NOT declare itself pause-capable.
+    assert (getattr(secretly_pauses, "metadata", None) or {}).get(
+        "pauses_graph"
+    ) is not True
+
+    agent = BaseAgent(
+        agent_name="test-undeclared",
+        model_factory=lambda: pytest.fail("model_factory must not run"),
+        tools=[secretly_pauses],
+        max_invoke_retries=0,
+    )
+
+    async def call_via_base_agent(state: MessagesState) -> dict[str, Any]:
+        return await agent.execute_tool_calls(
+            [
+                {
+                    "id": "tc-1",
+                    "name": "secretly_pauses",
+                    "args": {"query": "x"},
+                }
+            ],
+            state={},
+        )
+
+    builder = StateGraph(MessagesState)
+    builder.add_node("call_via_base_agent", call_via_base_agent)
+    builder.add_edge("__start__", "call_via_base_agent")
+    builder.add_edge("call_via_base_agent", "__end__")
+    graph = builder.compile(checkpointer=MemorySaver())
+
+    config = {"configurable": {"thread_id": "test-undeclared-thread"}}
+
+    with caplog.at_level("WARNING"):
+        # Single-tool batch, so the batch-refusal guard does not fire —
+        # interrupt() goes through the loop and BaseAgent's catch site
+        # is what surfaces the contract warning.
+        await graph.ainvoke({"messages": []}, config=config)
+
+    # The graph still pauses correctly (the GraphBubbleUp is propagated).
+    snapshot = await graph.aget_state(config)
+    interrupts = [iv for task in snapshot.tasks for iv in task.interrupts]
+    assert len(interrupts) == 1
+
+    # And the contract violation was surfaced.
+    matching = [
+        rec for rec in caplog.records
+        if "undeclared_pausing_tool" in rec.getMessage()
+        and "secretly_pauses" in rec.getMessage()
+    ]
+    assert matching, (
+        f"expected an undeclared_pausing_tool warning naming "
+        f"secretly_pauses; got log records: "
+        f"{[r.getMessage() for r in caplog.records]}"
+    )
+
+
+@pytest.mark.unit
 def test_request_human_review_signature() -> None:
     """The tool exposes a stable signature the SKILL.md can rely on."""
     review_tool = create_review_tool()

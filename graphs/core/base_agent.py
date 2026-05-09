@@ -412,6 +412,28 @@ class BaseAgent:
             return feedback
         except GraphBubbleUp:
             # interrupt()/Command propagation: not a tool failure.
+            # If the tool raised this without declaring itself
+            # pause-capable in its metadata, the upstream batch-refusal
+            # guard in execute_tool_calls did not protect siblings — log
+            # loudly so the tool author sees the contract violation
+            # during development.  We can't *prevent* the resulting
+            # side-effect duplication on resume from here (siblings have
+            # already run), but a noisy warning is cheap and catches
+            # the bug at the earliest possible moment.
+            metadata = getattr(tool_func, "metadata", None) or {}
+            if not metadata.get("pauses_graph"):
+                logger.warning(
+                    "undeclared_pausing_tool agent=%s tool=%s id=%s — tool "
+                    "raised GraphBubbleUp but its metadata does not declare "
+                    "pauses_graph=True. Set metadata={'pauses_graph': True} "
+                    "on the tool so BaseAgent.execute_tool_calls can refuse "
+                    "multi-tool batches that mix it with siblings (otherwise "
+                    "earlier sibling tools' side effects will duplicate on "
+                    "resume).",
+                    self.agent_name,
+                    name,
+                    tool_call_id,
+                )
             raise
         except Exception as e:
             logger.exception(

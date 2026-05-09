@@ -285,21 +285,22 @@ class Context:
 
             # ``BaseAgent.tools_by_name`` is dict-keyed by name, so a later
             # tool with a duplicate name silently overrides an earlier one.
-            # Drop external tools that collide with built-ins (skill /
-            # review) so a misconfigured MCP server can't redirect calls
-            # to the wrong implementation.
-            builtin_names = {t.name for t in [*skill_tools, review_tool]}
+            # Drop external tools that collide with built-ins OR with an
+            # already-kept external (two MCP servers exposing the same
+            # tool name) so neither path can silently shadow another.
+            seen_names = {t.name for t in [*skill_tools, review_tool]}
             kept_external: list[BaseTool] = []
             dropped: list[str] = []
             for ext in external_tools:
-                if ext.name in builtin_names:
+                if ext.name in seen_names:
                     dropped.append(ext.name)
                     continue
+                seen_names.add(ext.name)
                 kept_external.append(ext)
             if dropped:
                 logger.warning(
-                    "Dropped %d external MCP tool(s) whose names collide with "
-                    "built-ins: %s",
+                    "Dropped %d external MCP tool(s) whose names collide "
+                    "with a built-in or another external tool: %s",
                     len(dropped),
                     sorted(set(dropped)),
                 )

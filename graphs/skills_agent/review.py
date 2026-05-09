@@ -92,14 +92,26 @@ def create_review_tool() -> BaseTool:
             with shape ``{"request_id", "value", "note"}``.  The ``value``
             field will be one of the option values supplied above.
         """
+        valid_variants = {"default", "secondary", "destructive", "outline"}
         options = json.loads(options_json)
-        if not isinstance(options, list) or not all(
-            isinstance(opt, dict) and isinstance(opt.get("value"), str)
-            for opt in options
+        if (
+            not isinstance(options, list)
+            or len(options) == 0
+            or not all(
+                isinstance(opt, dict)
+                and isinstance(opt.get("value"), str)
+                and opt["value"]
+                and isinstance(opt.get("label"), str)
+                and opt["label"]
+                and opt.get("variant") in valid_variants
+                for opt in options
+            )
         ):
             raise ValueError(
-                "options_json must decode to a JSON list of objects with a "
-                "string 'value' field"
+                "options_json must decode to a non-empty JSON list of "
+                "objects, each with a non-empty string 'value', non-empty "
+                "string 'label', and 'variant' in "
+                f"{sorted(valid_variants)}"
             )
         payload = json.loads(payload_json) if payload_json else {}
         if not isinstance(payload, dict):

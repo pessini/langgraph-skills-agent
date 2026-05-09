@@ -5,10 +5,9 @@ from __future__ import annotations
 from typing import Annotated
 
 import pytest
+from core.base_agent import BaseAgent
 from langchain_core.tools import tool
 from langgraph.prebuilt import InjectedState
-
-from core.base_agent import BaseAgent
 
 
 @tool

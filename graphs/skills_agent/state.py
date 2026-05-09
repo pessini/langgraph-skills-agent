@@ -22,15 +22,12 @@ preserved across human turns for analytics.
 
 from __future__ import annotations
 
-from typing import Optional
-
-from langgraph.graph import MessagesState
-
 from core.feedback import ToolFeedback
+from langgraph.graph import MessagesState
 
 
 class State(MessagesState):
     tool_retry_attempts: int = 0
     tool_call_count: int = 0
-    tool_feedback: Optional[ToolFeedback] = None
+    tool_feedback: ToolFeedback | None = None
     tool_feedback_history: list[ToolFeedback] = []

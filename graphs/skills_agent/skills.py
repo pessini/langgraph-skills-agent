@@ -37,9 +37,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from skills_agent.utils.progressive_logging import log_progressive
-
 import yaml
+
+from skills_agent.utils.progressive_logging import log_progressive
 
 logger = logging.getLogger(__name__)
 

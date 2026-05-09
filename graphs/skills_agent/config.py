@@ -41,11 +41,11 @@ from dataclasses import MISSING, dataclass, field, fields
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from core.base_agent import BaseAgent
 from langchain_core.language_models import BaseChatModel
 from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
 
-from core.base_agent import BaseAgent
 from skills_agent.utils.progressive_logging import log_progressive
 
 if TYPE_CHECKING:
@@ -56,7 +56,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-async def _load_external_mcp_tools() -> list["BaseTool"]:
+async def _load_external_mcp_tools() -> list[BaseTool]:
     """Load tools from external MCP servers declared in the environment.
 
     Reads ``EXTERNAL_MCP_SERVERS_JSON`` — a JSON object mapping

@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import pytest
-from langchain_core.tools import tool
-
 from core.base_agent import BaseAgent
 from core.feedback import ErrorResponse, ToolFeedback
-
+from langchain_core.tools import tool
 
 _RECEIVED_PREV_ERRORS: list[str | None] = []
 

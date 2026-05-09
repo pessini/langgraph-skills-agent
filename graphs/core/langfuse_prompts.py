@@ -22,7 +22,7 @@ first call instead.
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -30,10 +30,10 @@ logger = logging.getLogger(__name__)
 def get_langfuse_prompt(
     prompt_name: str,
     *,
-    compile_vars: Optional[dict[str, Any]] = None,
+    compile_vars: dict[str, Any] | None = None,
     label: str = "production",
     cache_ttl_seconds: int = 300,
-    custom_suffix: Optional[str] = None,
+    custom_suffix: str | None = None,
 ) -> tuple[str, Any]:
     """Retrieve a prompt from Langfuse, optionally with custom-client fallback.
 

@@ -1,7 +1,6 @@
 """Unit tests for progressive disclosure logging helpers."""
 
 import pytest
-
 from skills_agent.utils.progressive_logging import format_progressive_event
 
 

@@ -28,8 +28,6 @@ not enforced):
 
 from __future__ import annotations
 
-from typing import Optional
-
 from pydantic import BaseModel, ConfigDict, model_validator
 
 
@@ -50,7 +48,7 @@ class ErrorResponse(BaseModel):
     error_type: str
     message: str
     retryable: bool
-    context: Optional[str] = None
+    context: str | None = None
 
 
 class ToolFeedback(BaseModel):
@@ -70,12 +68,12 @@ class ToolFeedback(BaseModel):
     # success path.
     model_config = ConfigDict(extra="forbid")
 
-    success: Optional[SuccessResponse] = None
-    error: Optional[ErrorResponse] = None
-    query: Optional[str] = None
+    success: SuccessResponse | None = None
+    error: ErrorResponse | None = None
+    query: str | None = None
 
     @model_validator(mode="after")
-    def _exactly_one_outcome_or_neither(self) -> "ToolFeedback":
+    def _exactly_one_outcome_or_neither(self) -> ToolFeedback:
         # Both populated would let __str__ silently mask the error by
         # preferring success — disallow the ambiguous shape outright.
         # An empty ToolFeedback (neither success nor error) is still

@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-
 from core.base_agent import BaseAgent
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 
 class TestIsNewHumanTurn:

@@ -18,7 +18,6 @@ from typing import Any
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.tools import tool
-
 from skills_agent import config as config_module
 from skills_agent import nodes as nodes_module
 from skills_agent.config import Context
@@ -37,7 +36,7 @@ class _ScriptedModel:
         self._script = list(script)
         self.calls = 0
 
-    def bind_tools(self, _tools: list[Any]) -> "_ScriptedModel":
+    def bind_tools(self, _tools: list[Any]) -> _ScriptedModel:
         return self
 
     async def ainvoke(self, _payload: Any) -> AIMessage:
@@ -189,3 +188,74 @@ class TestSkillsAgentNodes:
             "messages": [AIMessage(content="final")],
         }
         assert nodes_module.should_continue(state) == "__end__"
+
+
+class TestContextInitDecorator:
+    """Regression: every node must self-initialize Context.
+
+    Aegra creates a fresh Context per request. The HITL resume path
+    re-enters tool_node (or error_summary_node) directly with that
+    fresh Context, never having gone through agent_node — which is
+    where init used to live. Without the decorator, the node raises
+    ``Context not initialized`` and the run errors silently.
+    """
+
+    @pytest.mark.asyncio
+    async def test_tool_node_initializes_uninitialized_context(
+        self, patched_context
+    ) -> None:
+        # Critical: do NOT pre-initialize. This mirrors what Aegra does
+        # on resume from interrupt — fresh Context, entry at tool_node.
+        assert patched_context._skill_store is None
+
+        runtime = _FakeRuntime(context=patched_context)
+        ai_with_calls = AIMessage(
+            content="",
+            tool_calls=[{"id": "tc-resume", "name": "echo_tool", "args": {"query": "x"}}],
+        )
+        state: State = {  # type: ignore[typeddict-item]
+            "messages": [HumanMessage(content="go"), ai_with_calls],
+            "tool_call_count": 0,
+        }
+
+        # Pre-fix this raised RuntimeError("Context not initialized").
+        update = await nodes_module.tool_node(state, runtime)
+
+        assert patched_context._skill_store is not None  # init happened
+        assert update["tool_call_count"] == 1
+        assert len(update["messages"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_error_summary_node_initializes_uninitialized_context(
+        self, patched_context
+    ) -> None:
+        assert patched_context._skill_store is None
+
+        runtime = _FakeRuntime(context=patched_context)
+        state: State = {  # type: ignore[typeddict-item]
+            "messages": [HumanMessage(content="x"), AIMessage(content="prev")],
+        }
+        update = await nodes_module.error_summary_node(state, runtime)
+
+        assert patched_context._skill_store is not None
+        assert update["tool_retry_attempts"] == 0
+        assert "messages" in update
+
+    @pytest.mark.asyncio
+    async def test_decorator_is_idempotent(self, patched_context) -> None:
+        """Re-entry within the same request must reuse the cached store."""
+        runtime = _FakeRuntime(context=patched_context)
+        await patched_context.initialize()
+        cached_store = patched_context._skill_store
+
+        # Run agent_node once; the decorator should NOT re-init.
+        state: State = {  # type: ignore[typeddict-item]
+            "messages": [HumanMessage(content="hi")],
+            "tool_retry_attempts": 0,
+            "tool_call_count": 0,
+            "tool_feedback": None,
+            "tool_feedback_history": [],
+        }
+        await nodes_module.agent_node(state, runtime)
+
+        assert patched_context._skill_store is cached_store

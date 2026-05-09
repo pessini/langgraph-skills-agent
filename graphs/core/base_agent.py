@@ -29,6 +29,7 @@ from typing import Any, Callable, Optional, Union
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.tools import BaseTool
+from langgraph.errors import GraphBubbleUp
 from langgraph.prebuilt import InjectedState
 from pydantic import ValidationError
 
@@ -139,6 +140,10 @@ class BaseAgent:
                 feedback = await self._execute_single_tool(
                     tc, state, previous_errors_str
                 )
+            except GraphBubbleUp:
+                # LangGraph signals interrupt() / Command-routed control flow
+                # by raising. Must propagate, never wrap as TOOL_ERROR.
+                raise
             except Exception as e:
                 # Should not normally fire — _execute_single_tool catches
                 # tool-side exceptions itself. This is a defensive net for
@@ -204,6 +209,8 @@ class BaseAgent:
         """
         try:
             return await self.execute_tool_calls(tool_calls, state)
+        except GraphBubbleUp:
+            raise
         except Exception as e:
             logger.exception(
                 "execute_tool_calls_catastrophic agent=%s", self.agent_name
@@ -325,6 +332,9 @@ class BaseAgent:
                 }
             )
             return feedback
+        except GraphBubbleUp:
+            # interrupt()/Command propagation: not a tool failure.
+            raise
         except Exception as e:
             logger.exception(
                 "tool_execution_failed agent=%s tool=%s id=%s",
@@ -423,6 +433,8 @@ class BaseAgent:
         for attempt in range(self.max_invoke_retries + 1):
             try:
                 return await tool.ainvoke(args)
+            except GraphBubbleUp:
+                raise
             except Exception as e:
                 last_error = e
                 if attempt < self.max_invoke_retries and self._is_retryable_error(e):

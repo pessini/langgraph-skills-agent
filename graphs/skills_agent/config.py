@@ -282,18 +282,40 @@ class Context:
             skill_tools = create_skill_tools(self._skill_store)
             review_tool = create_review_tool()
             external_tools = await _load_external_mcp_tools()
-            self._tools = [*skill_tools, review_tool, *external_tools]
+
+            # ``BaseAgent.tools_by_name`` is dict-keyed by name, so a later
+            # tool with a duplicate name silently overrides an earlier one.
+            # Drop external tools that collide with built-ins (skill /
+            # review) so a misconfigured MCP server can't redirect calls
+            # to the wrong implementation.
+            builtin_names = {t.name for t in [*skill_tools, review_tool]}
+            kept_external: list[BaseTool] = []
+            dropped: list[str] = []
+            for ext in external_tools:
+                if ext.name in builtin_names:
+                    dropped.append(ext.name)
+                    continue
+                kept_external.append(ext)
+            if dropped:
+                logger.warning(
+                    "Dropped %d external MCP tool(s) whose names collide with "
+                    "built-ins: %s",
+                    len(dropped),
+                    sorted(set(dropped)),
+                )
+
+            self._tools = [*skill_tools, review_tool, *kept_external]
             logger.info(
                 "Created %d total tools (%d skill, 1 review, %d external)",
                 len(self._tools),
                 len(skill_tools),
-                len(external_tools),
+                len(kept_external),
             )
             log_progressive({
                 "event": "tools.created",
                 "summary": (
                     f"total={len(self._tools)} skill={len(skill_tools)} "
-                    f"review=1 external={len(external_tools)}"
+                    f"review=1 external={len(kept_external)}"
                 ),
             })
 

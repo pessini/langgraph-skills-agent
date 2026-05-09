@@ -21,6 +21,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import MessagesState, StateGraph
 from langgraph.types import Command
 
+from core.base_agent import BaseAgent
 from skills_agent.review import create_review_tool
 
 
@@ -121,6 +122,66 @@ async def test_payload_json_defaults_to_empty_dict() -> None:
     interrupts = [iv for task in snapshot.tasks for iv in task.interrupts]
     assert len(interrupts) == 1, f"expected 1 interrupt, got {len(interrupts)}"
     assert interrupts[0].value["payload"] == {}
+
+
+@pytest.mark.unit
+async def test_interrupt_propagates_through_base_agent() -> None:
+    """``BaseAgent.execute_tool_calls`` must let LangGraph's ``GraphInterrupt``
+    propagate so the graph actually pauses for human input.
+
+    Regression: the generic ``except Exception`` in the tool wrapper used to
+    swallow ``GraphInterrupt`` (an ``Exception`` subclass) and convert it into
+    a ``TOOL_ERROR``, silently breaking ``request_human_review`` end-to-end.
+    """
+    review_tool = create_review_tool()
+
+    agent = BaseAgent(
+        agent_name="test-interrupt",
+        model_factory=lambda: pytest.fail("model_factory must not run"),
+        tools=[review_tool],
+        max_invoke_retries=0,
+    )
+
+    options = [{"value": "approve", "label": "Approve", "variant": "default"}]
+
+    async def call_via_base_agent(state: MessagesState) -> dict[str, Any]:
+        # Drive the tool through BaseAgent.execute_tool_calls — the same
+        # path the real agent uses. The interrupt() call inside the tool
+        # raises GraphInterrupt; if BaseAgent swallowed it, the test would
+        # see a TOOL_ERROR ToolMessage instead of a paused snapshot.
+        return await agent.execute_tool_calls(
+            [
+                {
+                    "id": "tc-1",
+                    "name": "request_human_review",
+                    "args": {
+                        "title": "Test",
+                        "summary": "Pretend.",
+                        "options_json": json.dumps(options),
+                        "payload_json": "{}",
+                    },
+                }
+            ],
+            state={},
+        )
+
+    builder = StateGraph(MessagesState)
+    builder.add_node("call_via_base_agent", call_via_base_agent)
+    builder.add_edge("__start__", "call_via_base_agent")
+    builder.add_edge("call_via_base_agent", "__end__")
+    graph = builder.compile(checkpointer=MemorySaver())
+
+    config = {"configurable": {"thread_id": "test-base-agent-interrupt"}}
+
+    await graph.ainvoke({"messages": []}, config=config)
+
+    snapshot = await graph.aget_state(config)
+    interrupts = [iv for task in snapshot.tasks for iv in task.interrupts]
+    assert len(interrupts) == 1, (
+        f"expected graph to pause at interrupt, got {len(interrupts)} "
+        f"interrupts; tasks={snapshot.tasks}"
+    )
+    assert interrupts[0].value["title"] == "Test"
 
 
 @pytest.mark.unit

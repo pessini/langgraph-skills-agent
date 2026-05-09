@@ -93,7 +93,17 @@ def create_review_tool() -> BaseTool:
             field will be one of the option values supplied above.
         """
         options = json.loads(options_json)
+        if not isinstance(options, list) or not all(
+            isinstance(opt, dict) and isinstance(opt.get("value"), str)
+            for opt in options
+        ):
+            raise ValueError(
+                "options_json must decode to a JSON list of objects with a "
+                "string 'value' field"
+            )
         payload = json.loads(payload_json) if payload_json else {}
+        if not isinstance(payload, dict):
+            raise ValueError("payload_json must decode to a JSON object")
         request_id = uuid.uuid4().hex[:12]
         request: ReviewRequest = {
             "request_id": request_id,
@@ -108,11 +118,7 @@ def create_review_tool() -> BaseTool:
         raw_decision = interrupt(request)
         if not isinstance(raw_decision, dict):
             raise ValueError("Review decision must be a JSON object")
-        allowed_values = {
-            opt["value"]
-            for opt in options
-            if isinstance(opt, dict) and "value" in opt
-        }
+        allowed_values = {opt["value"] for opt in options}
         if raw_decision.get("value") not in allowed_values:
             raise ValueError(
                 f"Review decision value {raw_decision.get('value')!r} is not "

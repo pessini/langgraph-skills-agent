@@ -24,7 +24,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Callable, Optional, Union
+from collections.abc import Callable
+from typing import Any
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
@@ -124,7 +125,7 @@ class BaseAgent:
         previous_errors_str = self._serialize_previous_errors(history)
 
         tool_messages: list[ToolMessage] = []
-        latest_feedback: Optional[ToolFeedback] = None
+        latest_feedback: ToolFeedback | None = None
         new_retry_attempts = retry_attempts
 
         # Refuse a multi-tool batch that mixes a pause-capable tool with
@@ -301,7 +302,7 @@ class BaseAgent:
         update: dict[str, Any],
         is_new_human_turn: bool,
         *,
-        extra_reset_fields: Optional[dict[str, Any]] = None,
+        extra_reset_fields: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Merge per-turn reset fields into ``update`` when a new user turn
         began. ``tool_feedback_history`` is intentionally preserved."""
@@ -330,7 +331,7 @@ class BaseAgent:
     # Internal: single-tool execution
     # ------------------------------------------------------------------
 
-    def _tool_pauses_graph(self, tc: Union[dict[str, Any], Any]) -> bool:
+    def _tool_pauses_graph(self, tc: dict[str, Any] | Any) -> bool:
         """True iff ``tc`` names a tool flagged ``pauses_graph`` in metadata.
 
         Tools that call ``langgraph.types.interrupt`` (or otherwise raise
@@ -349,9 +350,9 @@ class BaseAgent:
 
     async def _execute_single_tool(
         self,
-        tc: Union[dict[str, Any], Any],
+        tc: dict[str, Any] | Any,
         state: dict[str, Any],
-        previous_errors_str: Optional[str],
+        previous_errors_str: str | None,
     ) -> ToolFeedback:
         import time
 
@@ -493,7 +494,7 @@ class BaseAgent:
         ``llm_retry_max_attempts`` times, then the last exception is
         re-raised.
         """
-        last_error: Optional[BaseException] = None
+        last_error: BaseException | None = None
         for attempt in range(1, self.llm_retry_max_attempts + 1):
             try:
                 return await model.ainvoke(payload)
@@ -529,7 +530,7 @@ class BaseAgent:
         LangChain tool that surfaces openai/anthropic exceptions inherits
         the same classification.
         """
-        last_error: Optional[BaseException] = None
+        last_error: BaseException | None = None
         for attempt in range(self.max_invoke_retries + 1):
             try:
                 return await tool.ainvoke(args)
@@ -570,7 +571,7 @@ class BaseAgent:
 
     def _serialize_previous_errors(
         self, history: list[ToolFeedback]
-    ) -> Optional[str]:
+    ) -> str | None:
         """Build the ``previous_errors`` string from the last 3 errored entries.
 
         Forwarded to tools that declare a ``previous_errors`` field in
@@ -749,8 +750,8 @@ class BaseAgent:
     # ------------------------------------------------------------------
 
     def _extract_tool_call_id(
-        self, tc: Union[dict[str, Any], Any]
-    ) -> Optional[str]:
+        self, tc: dict[str, Any] | Any
+    ) -> str | None:
         tool_call_id = (
             tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None)
         )

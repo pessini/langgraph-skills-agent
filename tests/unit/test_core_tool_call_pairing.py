@@ -10,9 +10,8 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-
 from core.base_agent import BaseAgent
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 
 def _make_agent() -> BaseAgent:
@@ -48,7 +47,7 @@ class TestEnsureToolCallPairs:
         ]
         out = agent._ensure_tool_call_pairs(msgs)
         assert len(out) == len(msgs)
-        for original, repaired in zip(msgs, out):
+        for original, repaired in zip(msgs, out, strict=True):
             assert original is repaired
 
     def test_orphan_in_middle_inserts_synthetic_before_next_non_tool(self) -> None:
@@ -119,7 +118,7 @@ class _CapturingModel:
     def __init__(self) -> None:
         self.last_payload: list[Any] = []
 
-    def bind_tools(self, _tools: list[Any]) -> "_CapturingModel":
+    def bind_tools(self, _tools: list[Any]) -> _CapturingModel:
         return self
 
     async def ainvoke(self, payload: Any) -> AIMessage:

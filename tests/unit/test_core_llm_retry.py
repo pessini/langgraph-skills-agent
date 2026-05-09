@@ -7,16 +7,12 @@ limits, timeouts, 5xx) retry with exponential backoff; permanent errors
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
-from unittest.mock import MagicMock
 
 import httpx
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage
-
 from core.base_agent import BaseAgent
-
+from langchain_core.messages import AIMessage, HumanMessage
 
 # ---------------------------------------------------------------------------
 # Fixtures: build openai exceptions with whatever args the SDK requires.
@@ -49,7 +45,7 @@ class _ScriptedModel:
         self._script = list(script)
         self.calls = 0
 
-    def bind_tools(self, _tools: list[Any]) -> "_ScriptedModel":
+    def bind_tools(self, _tools: list[Any]) -> _ScriptedModel:
         return self
 
     async def ainvoke(self, _payload: Any) -> AIMessage:

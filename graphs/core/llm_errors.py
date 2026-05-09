@@ -30,11 +30,23 @@ _permanent: tuple[type[BaseException], ...] = ()
 try:
     from openai import (
         APIConnectionError as _OAIConnection,
+    )
+    from openai import (
         APITimeoutError as _OAITimeout,
+    )
+    from openai import (
         AuthenticationError as _OAIAuth,
+    )
+    from openai import (
         BadRequestError as _OAIBadRequest,
+    )
+    from openai import (
         InternalServerError as _OAIInternal,
+    )
+    from openai import (
         PermissionDeniedError as _OAIPermission,
+    )
+    from openai import (
         RateLimitError as _OAIRateLimit,
     )
 
@@ -46,11 +58,23 @@ except ImportError:  # pragma: no cover
 try:
     from anthropic import (
         APIConnectionError as _AnthConnection,
+    )
+    from anthropic import (
         APITimeoutError as _AnthTimeout,
+    )
+    from anthropic import (
         AuthenticationError as _AnthAuth,
+    )
+    from anthropic import (
         BadRequestError as _AnthBadRequest,
+    )
+    from anthropic import (
         InternalServerError as _AnthInternal,
+    )
+    from anthropic import (
         PermissionDeniedError as _AnthPermission,
+    )
+    from anthropic import (
         RateLimitError as _AnthRateLimit,
     )
 

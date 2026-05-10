@@ -262,9 +262,12 @@ class TestContextInitDecorator:
 
 
 class TestStrictToolSchemaWiring:
-    """The ``strict_tool_schema`` flag on the cached SkillsAgent must
-    be set iff the configured provider is OpenAI.  Ollama's bind_tools
-    raises TypeError on the kwarg, so the gating is load-bearing.
+    """``Context`` wires ``strict_tool_schema`` as a callable that reads
+    ``self.provider`` dynamically.  Resolving it must reflect the
+    *current* provider — not whatever was set at ``initialize()`` time
+    — because ``model_factory`` reads ``provider`` dynamically too,
+    and a stale ``True`` would feed ``bind_tools(strict=True)`` into a
+    freshly-built Ollama model whose ``bind_tools`` raises ``TypeError``.
     """
 
     @pytest.mark.asyncio
@@ -276,7 +279,7 @@ class TestStrictToolSchemaWiring:
         )
         ctx = Context(skills_dir=str(skills_dir), provider="openai")
         await ctx.initialize()
-        assert ctx.agent.strict_tool_schema is True
+        assert ctx.agent._resolve_strict_tool_schema() is True
 
     @pytest.mark.asyncio
     async def test_strict_disabled_for_ollama(self, monkeypatch, tmp_path) -> None:
@@ -287,4 +290,26 @@ class TestStrictToolSchemaWiring:
         )
         ctx = Context(skills_dir=str(skills_dir), provider="ollama")
         await ctx.initialize()
-        assert ctx.agent.strict_tool_schema is False
+        assert ctx.agent._resolve_strict_tool_schema() is False
+
+    @pytest.mark.asyncio
+    async def test_strict_recomputes_when_provider_mutates(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """If a caller mutates ``ctx.provider`` after ``initialize()``,
+        the cached agent's strict resolution must follow on the next
+        call.  Otherwise a stale ``strict=True`` would crash Ollama at
+        ``bind_tools``.
+        """
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        monkeypatch.setattr(
+            "skills_agent.tools.create_skill_tools", lambda _store: []
+        )
+        ctx = Context(skills_dir=str(skills_dir), provider="openai")
+        await ctx.initialize()
+        assert ctx.agent._resolve_strict_tool_schema() is True
+
+        # Mid-thread mutation — model_factory reads this dynamically too.
+        ctx.provider = "ollama"
+        assert ctx.agent._resolve_strict_tool_schema() is False

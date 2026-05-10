@@ -51,7 +51,7 @@ class BaseAgent:
         max_invoke_retries: int = 3,
         llm_retry_max_attempts: int = 3,
         llm_retry_base_delay_seconds: float = 0.5,
-        strict_tool_schema: bool = False,
+        strict_tool_schema: bool | Callable[[], bool] = False,
     ) -> None:
         self.agent_name = agent_name
         self.model_factory = model_factory
@@ -61,11 +61,17 @@ class BaseAgent:
         self.max_invoke_retries = max_invoke_retries
         self.llm_retry_max_attempts = llm_retry_max_attempts
         self.llm_retry_base_delay_seconds = llm_retry_base_delay_seconds
-        # When True, ``bind_tools`` is called with ``strict=True`` so the
-        # provider (OpenAI) uses constrained decoding to guarantee tool
-        # calls match the JSON schema. Required-argument elision becomes
-        # impossible. Only enable for providers that support it (OpenAI);
-        # Ollama's bind_tools doesn't accept the kwarg.
+        # When truthy at call time, the model is bound with per-tool strict
+        # schemas so the provider (OpenAI) uses constrained decoding to
+        # guarantee tool calls match the JSON schema — required-argument
+        # elision becomes impossible.  Accepted as ``bool`` or a callable
+        # so callers whose effective provider can change at runtime (e.g.
+        # ``Context.provider`` is mutable) stay consistent with
+        # ``model_factory``'s dynamic-capture pattern.  Per-tool strict is
+        # gated by each tool's ``metadata["strict_schema_compatible"]``;
+        # tools without it are bound non-strict so a single bad schema
+        # (e.g. an external MCP server tool whose schema isn't a strict
+        # subset) cannot poison every request with a 400.
         self.strict_tool_schema = strict_tool_schema
 
     # ------------------------------------------------------------------
@@ -88,13 +94,53 @@ class BaseAgent:
         payload = [{"role": "system", "content": system_prompt}, *repaired]
         model = self.model_factory()
         if self.tools:
-            if self.strict_tool_schema:
-                model_with_tools = model.bind_tools(self.tools, strict=True)
+            if self._resolve_strict_tool_schema():
+                model_with_tools = model.bind_tools(self._build_strict_tool_dicts())
             else:
                 model_with_tools = model.bind_tools(self.tools)
         else:
             model_with_tools = model
         return await self._ainvoke_with_llm_retry(model_with_tools, payload)
+
+    def _resolve_strict_tool_schema(self) -> bool:
+        """Evaluate ``strict_tool_schema`` per-call.
+
+        Bool form is read directly; callable form is invoked so a
+        provider mutation (``ctx.provider = "ollama"``) is reflected on
+        the very next ``call_llm``.  The model factory captures
+        ``self`` dynamically for the same reason — keeping strict
+        resolution dynamic too avoids the inconsistency of
+        ``bind_tools(strict=True)`` being passed to a freshly-built
+        Ollama model whose ``bind_tools`` raises ``TypeError``.
+        """
+        flag = self.strict_tool_schema
+        if callable(flag):
+            return bool(flag())
+        return bool(flag)
+
+    def _build_strict_tool_dicts(self) -> list[dict[str, Any]]:
+        """Convert ``self.tools`` to OpenAI tool dicts with per-tool strict.
+
+        A tool is bound with ``strict=True`` only if its metadata carries
+        ``strict_schema_compatible=True``.  This is opt-in because
+        OpenAI rejects the *entire* request with a 400 if any single
+        tool's JSON schema falls outside strict mode's subset (e.g.
+        bare ``dict[str, Any]`` properties from a remote MCP server),
+        and external MCP tool schemas are server-defined — outside the
+        wiring user's control.
+        """
+        # Imported lazily so providers/clients that never enable strict
+        # don't pay the import cost on every agent construction.
+        from langchain_core.utils.function_calling import (  # noqa: PLC0415
+            convert_to_openai_tool,
+        )
+
+        out: list[dict[str, Any]] = []
+        for t in self.tools:
+            metadata = getattr(t, "metadata", None) or {}
+            tool_strict = bool(metadata.get("strict_schema_compatible"))
+            out.append(convert_to_openai_tool(t, strict=tool_strict))
+        return out
 
     async def call_llm_no_tools(
         self,
@@ -176,8 +222,16 @@ class BaseAgent:
                     tc_id = self._extract_tool_call_id(tc)
                     if tc_id is None:
                         continue
+                    tc_name = (
+                        tc.get("name") if isinstance(tc, dict)
+                        else getattr(tc, "name", None)
+                    )
                     refusal_messages.append(
-                        ToolMessage(content=refusal, tool_call_id=tc_id)
+                        ToolMessage(
+                            content=refusal,
+                            tool_call_id=tc_id,
+                            name=tc_name,
+                        )
                     )
                 refusal_feedback = ToolFeedback(
                     error=ErrorResponse(
@@ -494,14 +548,19 @@ class BaseAgent:
         Cases:
         - already a ``ToolFeedback`` → passthrough.
         - a ``dict`` matching the shape → ``ToolFeedback(**raw)``.
-        - a list of MCP-style text content blocks
-          (``[{"type": "text", "text": "..."}, ...]``) → concatenate the
-          ``text`` payloads.  This is what ``langchain-mcp-adapters``
-          returns when an MCP tool reply has no ``structuredContent``;
-          using ``str(raw)`` here would emit a Python *repr* (single
-          quotes, escaped strings) that's neither valid JSON nor
-          LLM-friendly.  Concatenation gives downstream consumers
-          (and the LLM on the next turn) the actual text payload.
+        - a list of MCP TextContent blocks
+          (``[{"type": "text", "text": "..."}, ...]`` per the MCP spec)
+          → concatenate the ``text`` payloads.  This is what
+          ``langchain-mcp-adapters`` returns when an MCP tool reply has
+          no ``structuredContent``; using ``str(raw)`` here would emit
+          a Python *repr* (single quotes, escaped strings) that's
+          neither valid JSON nor LLM-friendly.  Concatenation gives
+          downstream consumers (and the LLM on the next turn) the
+          actual text payload.  The shape check requires keys be a
+          subset of MCP TextContent's ``{type, text, annotations,
+          _meta}`` so a non-MCP tool that returns dicts with extra
+          fields (e.g. an ``id`` alongside ``text``) doesn't get its
+          fields silently dropped.
         - anything else → ``SuccessResponse(results=str(raw))``.
         """
         if isinstance(raw, ToolFeedback):
@@ -518,16 +577,28 @@ class BaseAgent:
         if (
             isinstance(raw, list)
             and raw
-            and all(
-                isinstance(b, dict)
-                and b.get("type") == "text"
-                and isinstance(b.get("text"), str)
-                for b in raw
-            )
+            and all(self._is_mcp_text_block(b) for b in raw)
         ):
             joined = "\n".join(b["text"] for b in raw)
             return ToolFeedback(success=SuccessResponse(results=joined))
         return ToolFeedback(success=SuccessResponse(results=str(raw)))
+
+    @staticmethod
+    def _is_mcp_text_block(b: Any) -> bool:
+        """True iff ``b`` matches MCP TextContent strictly.
+
+        Per the MCP spec, TextContent has ``type``, ``text``, and
+        optionally ``annotations`` / ``_meta``.  Requiring a strict
+        subset prevents accidentally collapsing a non-MCP tool's
+        ``[{"type":"text","text":"x","id":"abc"}, ...]`` (which carries
+        an ``id`` we'd silently drop) into a flat string.
+        """
+        return (
+            isinstance(b, dict)
+            and b.get("type") == "text"
+            and isinstance(b.get("text"), str)
+            and set(b.keys()) <= {"type", "text", "annotations", "_meta"}
+        )
 
     # ------------------------------------------------------------------
     # Internal: retry helpers
@@ -646,11 +717,15 @@ class BaseAgent:
         deterministically.
         """
         repaired: list[Any] = []
-        open_ids: list[str] = []
+        # Tracks (id, name) so synthetic repair messages can carry the
+        # tool's ``name`` like every other emitted ToolMessage.
+        open_pairs: list[tuple[str, str | None]] = []
 
         def _flush_orphans(position: str) -> None:
-            for orphan_id in open_ids:
-                repaired.append(self._make_synthetic_tool_message(orphan_id))
+            for orphan_id, orphan_name in open_pairs:
+                repaired.append(
+                    self._make_synthetic_tool_message(orphan_id, orphan_name)
+                )
                 logger.warning(
                     "tool_call_pair_repaired agent=%s orphan_id=%s position=%s",
                     self.agent_name,
@@ -664,17 +739,22 @@ class BaseAgent:
                         "position": position,
                     }
                 )
-            open_ids.clear()
+            open_pairs.clear()
 
         for m in messages:
             if isinstance(m, AIMessage) and getattr(m, "tool_calls", None):
                 _flush_orphans("mid")
-                open_ids.extend(tc["id"] for tc in m.tool_calls if tc.get("id"))
+                for tc in m.tool_calls:
+                    tc_id = tc.get("id")
+                    if tc_id:
+                        open_pairs.append((tc_id, tc.get("name")))
                 repaired.append(m)
                 continue
             if isinstance(m, ToolMessage):
-                if m.tool_call_id in open_ids:
-                    open_ids.remove(m.tool_call_id)
+                for pair in open_pairs:
+                    if pair[0] == m.tool_call_id:
+                        open_pairs.remove(pair)
+                        break
                 repaired.append(m)
                 continue
             _flush_orphans("mid")
@@ -683,10 +763,13 @@ class BaseAgent:
         _flush_orphans("tail")
         return repaired
 
-    def _make_synthetic_tool_message(self, tool_call_id: str) -> ToolMessage:
+    def _make_synthetic_tool_message(
+        self, tool_call_id: str, name: str | None = None
+    ) -> ToolMessage:
         return ToolMessage(
             tool_call_id=tool_call_id,
             status="error",
+            name=name,
             content=(
                 "TOOL_INTERRUPTED: No response was recorded for this tool call. "
                 "The prior run was terminated before the tool could execute. "
@@ -702,6 +785,10 @@ class BaseAgent:
             tool_call_id = self._extract_tool_call_id(tc)
             if tool_call_id is None:
                 continue
+            tc_name = (
+                tc.get("name") if isinstance(tc, dict)
+                else getattr(tc, "name", None)
+            )
             out.append(
                 ToolMessage(
                     content=(
@@ -709,6 +796,7 @@ class BaseAgent:
                         f"message: {error_message}"
                     ),
                     tool_call_id=tool_call_id,
+                    name=tc_name,
                 )
             )
             logger.warning(

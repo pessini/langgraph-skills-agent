@@ -142,4 +142,11 @@ def create_skill_tools(store: SkillStore) -> list[BaseTool]:
         f"    filename: Name of the file to read (from the skill's available_files)."
     )
 
+    # Opt the built-in skill tools into OpenAI strict mode: their schemas
+    # are pure ``str`` arguments, which strict mode accepts without
+    # rewriting.  External MCP tools default off (their schemas are
+    # server-defined and may not be a strict subset).
+    load_skill.metadata = {"strict_schema_compatible": True}
+    read_skill_file.metadata = {"strict_schema_compatible": True}
+
     return [load_skill, read_skill_file]  # type: ignore[list-item]

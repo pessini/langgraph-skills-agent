@@ -332,19 +332,27 @@ class Context:
             # builds a fresh model with the latest provider/model values.
             #
             # ``strict_tool_schema`` enables OpenAI's constrained-decoding
-            # mode for tool calls. With it on, the model physically cannot
-            # emit a tool call that violates the schema (missing required
-            # args, wrong types, etc.) — the failure mode where gpt-5-mini
-            # called ``detect_revenue_anomalies`` with ``{}`` becomes
-            # impossible. Only OpenAI's ``bind_tools`` accepts this kwarg;
-            # Ollama would raise TypeError, so it's gated by provider.
+            # mode for tool calls.  With it on, the model physically
+            # cannot emit a tool call that violates the schema (missing
+            # required args, wrong types, etc.) — the failure mode where
+            # gpt-5-mini called ``detect_revenue_anomalies`` with ``{}``
+            # becomes impossible.
+            #
+            # Passed as a callable so it stays consistent with
+            # ``model_factory``'s dynamic-capture pattern: if a caller
+            # mutates ``self.provider`` mid-thread (openai→ollama or
+            # the reverse), the next ``call_llm`` reads the *current*
+            # provider rather than whatever was set at ``initialize()``
+            # time.  Otherwise a stale ``True`` would feed
+            # ``bind_tools(strict=True)`` into a freshly-built Ollama
+            # model whose ``bind_tools`` raises ``TypeError``.
             self._agent = SkillsAgent(
                 agent_name="skills_agent",
                 model_factory=lambda: _load_chat_model(
                     self.provider, self.model, self.base_url
                 ),
                 tools=self._tools,
-                strict_tool_schema=(self.provider == "openai"),
+                strict_tool_schema=lambda: self.provider == "openai",
             )
 
     @property

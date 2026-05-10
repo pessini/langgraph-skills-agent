@@ -598,14 +598,21 @@ class BaseAgent:
         """True iff ``b`` matches MCP TextContent strictly.
 
         Per the MCP spec, TextContent has ``type``, ``text``, and
-        optionally ``annotations`` / ``_meta``.  ``id`` is also
-        permitted because ``langchain-mcp-adapters`` always tags each
-        block with an auto-generated ``id`` like ``"lc_<uuid>"`` —
-        without ``id`` in the allowed set, real MCP tool output would
-        fail this heuristic, fall through to ``str(raw)``, and surface
-        as a Python *repr* the LLM and downstream consumers can't
-        parse.  The ``id`` is plumbing, not payload, and is safely
-        droppable when concatenating text.
+        optionally ``annotations`` / ``_meta``.  ``id``, ``index``, and
+        ``extras`` are also permitted because they are LangChain
+        plumbing that ``langchain-mcp-adapters`` may attach to each
+        block: ``id`` is already populated today (auto-generated
+        ``"lc_<uuid>"``), and ``index`` / ``extras`` are part of
+        upstream LangChain's ``TextContentBlock`` TypedDict
+        (``langchain_core.messages.content.create_text_block``) —
+        ``index`` is set during streaming, ``extras`` carries
+        provider-specific kwargs.  Today's adapter version doesn't
+        forward ``index``/``extras``, but a future minor bump that
+        mirrors the upstream type would silently regress every MCP
+        tool result to ``str(raw)`` if these keys were not in the
+        allow-list — the same regression class v0.2.4 just fixed for
+        ``id``, closed pre-emptively here.  All three are plumbing,
+        not payload, and are safely droppable when concatenating text.
 
         Requiring a strict subset still prevents accidentally
         collapsing a non-MCP tool return whose dicts carry
@@ -616,7 +623,8 @@ class BaseAgent:
             isinstance(b, dict)
             and b.get("type") == "text"
             and isinstance(b.get("text"), str)
-            and set(b.keys()) <= {"type", "text", "annotations", "_meta", "id"}
+            and set(b.keys())
+            <= {"type", "text", "annotations", "_meta", "id", "index", "extras"}
         )
 
     # ------------------------------------------------------------------

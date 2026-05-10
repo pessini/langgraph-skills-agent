@@ -104,3 +104,51 @@ def test_wrap_unwraps_mcp_text_blocks_with_annotations() -> None:
     feedback = agent._wrap_as_tool_feedback(raw)
     assert feedback.success is not None
     assert feedback.success.results == "first\nsecond"
+
+
+def test_wrap_unwraps_mcp_text_block_with_langchain_index() -> None:
+    """LangChain's ``TextContentBlock`` (``langchain_core.messages.content``)
+    populates ``index`` during streaming.  ``langchain-mcp-adapters`` does
+    not forward it today, but a future minor version that mirrors the
+    upstream LangChain shape would silently regress every MCP tool result
+    to ``str(raw)`` if the unwrap branch did not allow ``index``.  Same
+    regression class as the one v0.2.4 fixed for ``id`` — closed
+    pre-emptively here.
+    """
+    agent = _make_agent()
+    raw = [{"type": "text", "text": "payload", "index": 0}]
+    feedback = agent._wrap_as_tool_feedback(raw)
+    assert feedback.success is not None
+    assert feedback.success.results == "payload"
+
+
+def test_wrap_unwraps_mcp_text_block_with_langchain_extras() -> None:
+    """LangChain's ``TextContentBlock`` carries ``extras`` for
+    provider-specific kwargs.  Forwarding-aware adapter versions would
+    surface it; the unwrap branch must accept it as plumbing the same
+    way ``id`` is treated.
+    """
+    agent = _make_agent()
+    raw = [{"type": "text", "text": "payload", "extras": {"provider": "x"}}]
+    feedback = agent._wrap_as_tool_feedback(raw)
+    assert feedback.success is not None
+    assert feedback.success.results == "payload"
+
+
+def test_wrap_unwraps_mcp_text_block_with_index_and_extras() -> None:
+    """Combined: a block with both ``index`` and ``extras`` (alongside
+    other plumbing like ``id``) still unwraps to its text payload.
+    """
+    agent = _make_agent()
+    raw = [
+        {
+            "type": "text",
+            "text": "payload",
+            "id": "lc_abc",
+            "index": 0,
+            "extras": {"provider": "x"},
+        }
+    ]
+    feedback = agent._wrap_as_tool_feedback(raw)
+    assert feedback.success is not None
+    assert feedback.success.results == "payload"

@@ -51,6 +51,7 @@ class BaseAgent:
         max_invoke_retries: int = 3,
         llm_retry_max_attempts: int = 3,
         llm_retry_base_delay_seconds: float = 0.5,
+        strict_tool_schema: bool = False,
     ) -> None:
         self.agent_name = agent_name
         self.model_factory = model_factory
@@ -60,6 +61,12 @@ class BaseAgent:
         self.max_invoke_retries = max_invoke_retries
         self.llm_retry_max_attempts = llm_retry_max_attempts
         self.llm_retry_base_delay_seconds = llm_retry_base_delay_seconds
+        # When True, ``bind_tools`` is called with ``strict=True`` so the
+        # provider (OpenAI) uses constrained decoding to guarantee tool
+        # calls match the JSON schema. Required-argument elision becomes
+        # impossible. Only enable for providers that support it (OpenAI);
+        # Ollama's bind_tools doesn't accept the kwarg.
+        self.strict_tool_schema = strict_tool_schema
 
     # ------------------------------------------------------------------
     # Public: LLM invocation
@@ -80,7 +87,13 @@ class BaseAgent:
         repaired = self._ensure_tool_call_pairs(messages)
         payload = [{"role": "system", "content": system_prompt}, *repaired]
         model = self.model_factory()
-        model_with_tools = model.bind_tools(self.tools) if self.tools else model
+        if self.tools:
+            if self.strict_tool_schema:
+                model_with_tools = model.bind_tools(self.tools, strict=True)
+            else:
+                model_with_tools = model.bind_tools(self.tools)
+        else:
+            model_with_tools = model
         return await self._ainvoke_with_llm_retry(model_with_tools, payload)
 
     async def call_llm_no_tools(

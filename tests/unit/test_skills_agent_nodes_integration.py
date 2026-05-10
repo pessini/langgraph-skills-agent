@@ -259,3 +259,32 @@ class TestContextInitDecorator:
         await nodes_module.agent_node(state, runtime)
 
         assert patched_context._skill_store is cached_store
+
+
+class TestStrictToolSchemaWiring:
+    """The ``strict_tool_schema`` flag on the cached SkillsAgent must
+    be set iff the configured provider is OpenAI.  Ollama's bind_tools
+    raises TypeError on the kwarg, so the gating is load-bearing.
+    """
+
+    @pytest.mark.asyncio
+    async def test_strict_enabled_for_openai(self, monkeypatch, tmp_path) -> None:
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        monkeypatch.setattr(
+            "skills_agent.tools.create_skill_tools", lambda _store: []
+        )
+        ctx = Context(skills_dir=str(skills_dir), provider="openai")
+        await ctx.initialize()
+        assert ctx.agent.strict_tool_schema is True
+
+    @pytest.mark.asyncio
+    async def test_strict_disabled_for_ollama(self, monkeypatch, tmp_path) -> None:
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        monkeypatch.setattr(
+            "skills_agent.tools.create_skill_tools", lambda _store: []
+        )
+        ctx = Context(skills_dir=str(skills_dir), provider="ollama")
+        await ctx.initialize()
+        assert ctx.agent.strict_tool_schema is False

@@ -330,12 +330,21 @@ class Context:
         if self._agent is None:
             # The model_factory closure captures `self` so each call
             # builds a fresh model with the latest provider/model values.
+            #
+            # ``strict_tool_schema`` enables OpenAI's constrained-decoding
+            # mode for tool calls. With it on, the model physically cannot
+            # emit a tool call that violates the schema (missing required
+            # args, wrong types, etc.) — the failure mode where gpt-5-mini
+            # called ``detect_revenue_anomalies`` with ``{}`` becomes
+            # impossible. Only OpenAI's ``bind_tools`` accepts this kwarg;
+            # Ollama would raise TypeError, so it's gated by provider.
             self._agent = SkillsAgent(
                 agent_name="skills_agent",
                 model_factory=lambda: _load_chat_model(
                     self.provider, self.model, self.base_url
                 ),
                 tools=self._tools,
+                strict_tool_schema=(self.provider == "openai"),
             )
 
     @property

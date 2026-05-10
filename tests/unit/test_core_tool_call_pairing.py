@@ -157,3 +157,27 @@ class TestCallLlmNoToolsRepairsOrphans:
         synthetic = [m for m in body if _is_synthetic(m)]
         assert len(synthetic) == 1
         assert synthetic[0].tool_call_id == "orphan-tail"
+
+
+class TestSyntheticToolMessageCarriesName:
+    """The ``name`` contract introduced for ``ToolMessage`` must hold on
+    the orphan-repair path too — downstream consumers that scan by
+    ``ToolMessage.name`` should see the original tool's name even on
+    interrupted-then-resumed threads.
+    """
+
+    def test_synthetic_carries_name_from_orphan_tool_call(self) -> None:
+        agent = _make_agent()
+        msgs = [
+            HumanMessage(content="q"),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"id": "tc-A", "name": "echo_tool", "args": {}},
+                ],
+            ),
+        ]
+        out = agent._ensure_tool_call_pairs(msgs)
+        synthetic = next(m for m in out if _is_synthetic(m))
+        assert synthetic.name == "echo_tool"
+        assert synthetic.tool_call_id == "tc-A"

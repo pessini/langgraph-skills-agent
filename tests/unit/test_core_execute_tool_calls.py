@@ -152,6 +152,21 @@ class TestReturnShapes:
         assert "retryable=True" in msg.content
         assert "could not process x" in msg.content
 
+    @pytest.mark.asyncio
+    async def test_execute_tool_calls_sets_name_on_tool_message(self) -> None:
+        """ToolMessage must carry the tool's name so downstream consumers
+        can match by name without walking tool_calls on the prior AIMessage.
+        """
+        agent = _make_agent([returns_string])
+        out = await agent.execute_tool_calls(
+            [_tc("returns_string", {"query": "hi"})], state={}
+        )
+        [msg] = out["messages"]
+        assert isinstance(msg, ToolMessage)
+        assert msg.name == "returns_string"
+        assert msg.tool_call_id == "tc-1"
+        assert "hello hi" in msg.content
+
 
 # ---------------------------------------------------------------------------
 # Retry-attempt arithmetic
@@ -225,3 +240,62 @@ class TestExecuteSafe:
             assert "TOOL_ERROR" in msg.content
             assert "Internal error" in msg.content
         assert out["tool_retry_attempts"] == agent.max_tool_retries
+
+    @pytest.mark.asyncio
+    async def test_catastrophic_fallback_carries_name(
+        self, monkeypatch
+    ) -> None:
+        """Fallback ToolMessages emitted by execute_tool_calls_safe must
+        also set ``name`` so downstream consumers that match by name
+        keep working through the catastrophic path.
+        """
+        agent = _make_agent([returns_string])
+
+        async def boom(*_a, **_kw):
+            raise RuntimeError("wrapper exploded")
+
+        monkeypatch.setattr(agent, "execute_tool_calls", boom)
+
+        out = await agent.execute_tool_calls_safe(
+            [_tc("returns_string", {}, "id-1")], state={}
+        )
+        [msg] = out["messages"]
+        assert msg.name == "returns_string"
+
+
+# ---------------------------------------------------------------------------
+# Batch rejection (pause-capable tool mixed with siblings)
+# ---------------------------------------------------------------------------
+
+
+@tool
+def pausing_tool(query: str) -> str:
+    """Pretends to be pause-capable (metadata is set after definition)."""
+    return f"paused: {query}"
+
+
+pausing_tool.metadata = {"pauses_graph": True}
+
+
+class TestBatchRejectionCarriesName:
+    @pytest.mark.asyncio
+    async def test_each_refusal_carries_its_originating_tool_name(self) -> None:
+        """When a multi-tool batch mixes a pause-capable tool with siblings,
+        BaseAgent emits one refusal ToolMessage per call. Each must carry
+        ``name`` so the contract introduced for ToolMessage is consistent.
+        """
+        agent = _make_agent([pausing_tool, returns_string])
+        out = await agent.execute_tool_calls(
+            [
+                _tc("returns_string", {"query": "x"}, "id-1"),
+                _tc("pausing_tool", {"query": "y"}, "id-2"),
+            ],
+            state={},
+        )
+        msgs = out["messages"]
+        assert len(msgs) == 2
+        names = {m.name for m in msgs}
+        assert names == {"returns_string", "pausing_tool"}
+        for m in msgs:
+            assert "TOOL_ERROR" in m.content
+            assert "BATCH_REJECTED" in m.content

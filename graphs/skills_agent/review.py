@@ -170,5 +170,14 @@ def create_review_tool() -> BaseTool:
     # can detect a multi-tool batch that mixes it with siblings and
     # refuse the batch before any side effects fire (LangGraph replays
     # the node from the top on resume — sibling tools would duplicate).
-    request_human_review.metadata = {"pauses_graph": True}
+    #
+    # ``strict_schema_compatible=True`` opts the tool into OpenAI's
+    # constrained-decoding mode: the schema only uses ``str`` args, and
+    # LangChain's converter promotes the optional ``payload_json``
+    # default into ``required`` so the resulting JSON Schema is a valid
+    # strict subset.
+    request_human_review.metadata = {
+        "pauses_graph": True,
+        "strict_schema_compatible": True,
+    }
     return request_human_review  # type: ignore[return-value]

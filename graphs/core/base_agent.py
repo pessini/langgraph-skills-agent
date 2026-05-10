@@ -198,6 +198,11 @@ class BaseAgent:
                 # next assistant turn.
                 continue
 
+            tc_name = (
+                tc.get("name") if isinstance(tc, dict)
+                else getattr(tc, "name", None)
+            )
+
             try:
                 feedback = await self._execute_single_tool(
                     tc, state, previous_errors_str
@@ -246,8 +251,18 @@ class BaseAgent:
                     f"TOOL_QUERY\n{feedback.query or ''}"
                 )
 
+            # ``name`` is required for downstream consumers that scan the
+            # message tree by tool name (e.g. UI builders extracting the
+            # query_monthly_sales rows for chart rendering).  LangChain's
+            # ``ToolMessage`` accepts it as an optional field; without it,
+            # the only way to correlate a ToolMessage back to its origin
+            # tool is by walking tool_calls on the prior AIMessage.
             tool_messages.append(
-                ToolMessage(content=content, tool_call_id=tool_call_id)
+                ToolMessage(
+                    content=content,
+                    tool_call_id=tool_call_id,
+                    name=tc_name,
+                )
             )
 
         return {

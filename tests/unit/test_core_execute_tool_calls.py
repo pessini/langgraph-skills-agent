@@ -152,6 +152,21 @@ class TestReturnShapes:
         assert "retryable=True" in msg.content
         assert "could not process x" in msg.content
 
+    @pytest.mark.asyncio
+    async def test_execute_tool_calls_sets_name_on_tool_message(self) -> None:
+        """ToolMessage must carry the tool's name so downstream consumers
+        can match by name without walking tool_calls on the prior AIMessage.
+        """
+        agent = _make_agent([returns_string])
+        out = await agent.execute_tool_calls(
+            [_tc("returns_string", {"query": "hi"})], state={}
+        )
+        [msg] = out["messages"]
+        assert isinstance(msg, ToolMessage)
+        assert msg.name == "returns_string"
+        assert msg.tool_call_id == "tc-1"
+        assert "hello hi" in msg.content
+
 
 # ---------------------------------------------------------------------------
 # Retry-attempt arithmetic

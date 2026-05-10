@@ -286,9 +286,8 @@ class BaseAgent:
                 else getattr(tc, "name", None)
             )
 
-            executed_count += 1
             try:
-                feedback = await self._execute_single_tool(
+                feedback, did_invoke = await self._execute_single_tool(
                     tc, state, previous_errors_str
                 )
             except GraphBubbleUp:
@@ -298,7 +297,10 @@ class BaseAgent:
             except Exception as e:
                 # Should not normally fire — _execute_single_tool catches
                 # tool-side exceptions itself. This is a defensive net for
-                # bugs in the wrapper.
+                # bugs in the wrapper (e.g. ``_inject_state_args`` raising
+                # KeyError on a missing InjectedState field, which
+                # propagates *before* the inner try/except and so isn't
+                # an actual tool invocation — ``did_invoke=False``).
                 logger.exception(
                     "execute_tool_calls_unexpected agent=%s id=%s",
                     self.agent_name,
@@ -312,6 +314,9 @@ class BaseAgent:
                         context="execute_tool_calls wrapper",
                     )
                 )
+                did_invoke = False
+            if did_invoke:
+                executed_count += 1
 
             latest_feedback = feedback
             history.append(feedback)
@@ -479,7 +484,18 @@ class BaseAgent:
         tc: dict[str, Any] | Any,
         state: dict[str, Any],
         previous_errors_str: str | None,
-    ) -> ToolFeedback:
+    ) -> tuple[ToolFeedback, bool]:
+        """Run one tool call and return ``(feedback, did_invoke)``.
+
+        ``did_invoke`` is False when the call returned without
+        reaching the underlying tool (today: only ``TOOL_NOT_FOUND``;
+        kept as a flag rather than coupling the caller to a string
+        ``error_type`` so future no-invoke branches can opt in
+        without changing call sites).  ``execute_tool_calls`` reads
+        the flag to decide whether to charge the per-turn budget —
+        same intent as Fix 5 generalised to every "ToolMessage emitted
+        but tool didn't run" path.
+        """
         import time
 
         name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None)
@@ -490,13 +506,16 @@ class BaseAgent:
             logger.error(
                 "tool_not_found agent=%s tool=%s", self.agent_name, name
             )
-            return ToolFeedback(
-                error=ErrorResponse(
-                    error_type="TOOL_NOT_FOUND",
-                    message=f"Unknown tool '{name}'.",
-                    retryable=False,
-                    context=None,
-                )
+            return (
+                ToolFeedback(
+                    error=ErrorResponse(
+                        error_type="TOOL_NOT_FOUND",
+                        message=f"Unknown tool '{name}'.",
+                        retryable=False,
+                        context=None,
+                    )
+                ),
+                False,
             )
 
         tool_func = self.tools_by_name[name]
@@ -566,7 +585,7 @@ class BaseAgent:
                     "duration_ms": duration_ms,
                 }
             )
-            return feedback
+            return feedback, True
         except GraphBubbleUp:
             # interrupt()/Command propagation: not a tool failure.
             # If the tool raised this without declaring itself
@@ -607,13 +626,19 @@ class BaseAgent:
                     "error": str(e),
                 }
             )
-            return ToolFeedback(
-                error=ErrorResponse(
-                    error_type="EXECUTION_ERROR",
-                    message=str(e),
-                    retryable=True,
-                    context="internal tool wrapper",
-                )
+            # ``did_invoke=True``: control reached ``tool.ainvoke`` —
+            # the tool ran and raised, so the call drained real
+            # resources and should charge the per-turn budget.
+            return (
+                ToolFeedback(
+                    error=ErrorResponse(
+                        error_type="EXECUTION_ERROR",
+                        message=str(e),
+                        retryable=True,
+                        context="internal tool wrapper",
+                    )
+                ),
+                True,
             )
 
     def _wrap_as_tool_feedback(self, raw: Any) -> ToolFeedback:

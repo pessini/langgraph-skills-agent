@@ -404,3 +404,40 @@ class TestExecutedToolCount:
         # Tools didn't run — fallback ToolMessages are bookkeeping, not
         # work that should drain the budget.
         assert out["executed_tool_count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_unknown_tool_does_not_count_as_executed(self) -> None:
+        """``TOOL_NOT_FOUND`` is the same category as batch-rejection and
+        catastrophic-fallback: a ``ToolMessage`` is emitted to satisfy
+        the AIMessage<->ToolMessage pairing invariant, but no tool was
+        actually invoked.  Charging the per-turn budget for it would let
+        an LLM that hallucinates non-existent tool names drain
+        ``MAX_TOOL_CALLS`` to zero useful work — the same bug class
+        Fix 5 was meant to close.
+        """
+        agent = _make_agent([returns_string])
+        out = await agent.execute_tool_calls(
+            [_tc("does_not_exist", {}, "id-1")], state={}
+        )
+        # Pre-fix: executed_tool_count == 1 (incremented before the
+        # name-lookup branch returned TOOL_NOT_FOUND).
+        assert out["executed_tool_count"] == 0
+        # ToolMessage still emitted to keep the pairing invariant.
+        assert len(out["messages"]) == 1
+        assert "TOOL_NOT_FOUND" in out["messages"][0].content
+
+    @pytest.mark.asyncio
+    async def test_mixed_known_and_unknown_counts_only_known(self) -> None:
+        """A batch with one valid tool and one unknown name must charge
+        the budget by 1 (the valid invocation), not 2.
+        """
+        agent = _make_agent([returns_string])
+        out = await agent.execute_tool_calls(
+            [
+                _tc("returns_string", {"query": "x"}, "id-1"),
+                _tc("does_not_exist", {}, "id-2"),
+            ],
+            state={},
+        )
+        assert out["executed_tool_count"] == 1
+        assert len(out["messages"]) == 2

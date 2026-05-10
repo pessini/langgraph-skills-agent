@@ -397,10 +397,26 @@ class BaseAgent:
         extra_reset_fields: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Merge per-turn reset fields into ``update`` when a new user turn
-        began. ``tool_feedback_history`` is intentionally preserved."""
+        began.
+
+        Resets:
+
+        - ``tool_retry_attempts`` to 0 (avoid stale retry-budget exhaustion).
+        - ``tool_feedback`` to ``None``.
+        - ``tool_feedback_history`` to ``[]`` so prior-turn errors don't
+          leak into the next turn's ``previous_errors`` injection at
+          ``_serialize_previous_errors``.  The history was previously
+          preserved "for analytics", but analytics consume LangFuse
+          traces or Aegra checkpoints — not in-memory graph state.
+          Carrying a turn-1 error into turn 2's first tool call (where
+          the user's question is unrelated) tells the LLM to avoid
+          problems it isn't currently exhibiting and silently degrades
+          multi-turn quality.
+        """
         if is_new_human_turn:
             update["tool_retry_attempts"] = 0
             update["tool_feedback"] = None
+            update["tool_feedback_history"] = []
             if extra_reset_fields:
                 update.update(extra_reset_fields)
         return update

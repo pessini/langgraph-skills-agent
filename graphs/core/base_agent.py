@@ -23,6 +23,7 @@ metrics sink (default is no-op).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import Callable
 from typing import Any
@@ -507,7 +508,30 @@ class BaseAgent:
 
         start = time.perf_counter()
         try:
-            raw = await self._ainvoke_tool_with_retry(tool_func, args)
+            # Tools declaring response_format="content_and_artifact" — the
+            # langchain-mcp-adapters wiring uses this so each tool call
+            # returns ``(content, artifact)`` — must be invoked via the
+            # ToolMessage form.  Otherwise ``BaseTool._format_output``
+            # short-circuits when ``tool_call_id`` is absent and returns
+            # *only* the content, dropping the artifact (which carries
+            # MCP ``structuredContent`` for tools that return ``content=[]``
+            # plus a structured payload).  Other tools keep the legacy
+            # plain-args form so existing return shapes (``ToolFeedback``,
+            # plain dicts, plain strings) are not affected — switching
+            # everyone to the ToolMessage form would force ``_format_output``
+            # to ``json.dumps`` non-content returns and break the
+            # passthrough contract for ``ToolFeedback``.
+            response_format = getattr(tool_func, "response_format", "content")
+            if response_format == "content_and_artifact":
+                invoke_payload: dict[str, Any] = {
+                    "args": args,
+                    "id": tool_call_id,
+                    "name": name,
+                    "type": "tool_call",
+                }
+            else:
+                invoke_payload = args
+            raw = await self._ainvoke_tool_with_retry(tool_func, invoke_payload)
             feedback = self._wrap_as_tool_feedback(raw)
             duration_ms = int((time.perf_counter() - start) * 1000)
             self.on_tool_event(
@@ -573,6 +597,21 @@ class BaseAgent:
 
         Cases:
         - already a ``ToolFeedback`` → passthrough.
+        - a ``ToolMessage`` (the shape returned for tools declaring
+          ``response_format="content_and_artifact"`` — i.e. MCP tools
+          via ``langchain-mcp-adapters``).  Two sub-cases:
+
+          1. ``content`` is empty / ``None`` and ``artifact`` carries
+             ``structured_content`` → emit the structured payload as
+             JSON.  This covers the spec-compliant MCP tool that
+             returns ``content=[]`` with ``structuredContent={...}``.
+             Without this branch the result would surface as
+             ``str([])`` = ``"[]"`` and the LLM would see an empty
+             list literal where the actual data lives.
+
+          2. ``content`` is populated → recurse on ``content`` so the
+             text-block / fallback branches handle it as if the tool
+             had returned the content directly.
         - a ``dict`` matching the shape → ``ToolFeedback(**raw)``.
         - a list of MCP TextContent blocks
           (``[{"type": "text", "text": "..."}, ...]`` per the MCP spec)
@@ -583,14 +622,29 @@ class BaseAgent:
           neither valid JSON nor LLM-friendly.  Concatenation gives
           downstream consumers (and the LLM on the next turn) the
           actual text payload.  The shape check requires keys be a
-          subset of MCP TextContent's ``{type, text, annotations,
-          _meta}`` so a non-MCP tool that returns dicts with extra
-          fields (e.g. an ``id`` alongside ``text``) doesn't get its
-          fields silently dropped.
+          subset of MCP TextContent's allowed plumbing set so a
+          non-MCP tool that returns dicts with extra fields (e.g. a
+          ``"rogue"`` field that may be semantically meaningful) does
+          not get its fields silently dropped.
         - anything else → ``SuccessResponse(results=str(raw))``.
         """
         if isinstance(raw, ToolFeedback):
             return raw
+        if isinstance(raw, ToolMessage):
+            artifact = getattr(raw, "artifact", None)
+            content = raw.content
+            if (not content) and isinstance(artifact, dict):
+                structured = artifact.get("structured_content")
+                if structured is not None:
+                    return ToolFeedback(
+                        success=SuccessResponse(
+                            results=json.dumps(structured, ensure_ascii=False)
+                        )
+                    )
+            # Fall through: process the inner content as if the tool
+            # had returned it directly.  This keeps the text-block
+            # unwrap logic in one place.
+            raw = content
         if isinstance(raw, dict):
             try:
                 return ToolFeedback(**raw)

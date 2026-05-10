@@ -8,13 +8,15 @@ guarantee in execute_tool_calls_safe.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
 from core.base_agent import BaseAgent
 from core.feedback import ErrorResponse, ToolFeedback
 from langchain_core.messages import ToolMessage
-from langchain_core.tools import tool
+from langchain_core.tools import StructuredTool, tool
+from pydantic import BaseModel
 
 
 @tool
@@ -275,6 +277,57 @@ def pausing_tool(query: str) -> str:
 
 
 pausing_tool.metadata = {"pauses_graph": True}
+
+
+class _StructuredOnlyArgs(BaseModel):
+    query: str
+
+
+def _make_structured_only_mcp_tool() -> StructuredTool:
+    """Stand in for an MCP tool that returns ``content=[]`` plus
+    ``structuredContent={...}`` — ``langchain-mcp-adapters`` packages
+    that as ``([], MCPToolArtifact(...))`` from a coroutine when
+    ``response_format="content_and_artifact"`` is set.
+    """
+
+    async def _call(query: str) -> tuple[list, dict]:
+        # Empty content list — the result lives in the artifact.
+        return [], {"structured_content": {"deals": 12, "label": query}}
+
+    return StructuredTool(
+        name="mcp_structured_only",
+        description="MCP tool that returns only structuredContent",
+        args_schema=_StructuredOnlyArgs,
+        coroutine=_call,
+        response_format="content_and_artifact",
+    )
+
+
+class TestStructuredContentRecovery:
+    @pytest.mark.asyncio
+    async def test_structured_content_round_trips_as_json(self) -> None:
+        """A spec-compliant MCP tool that returns ``content=[]`` with
+        ``structuredContent={...}`` must reach the LLM as parseable JSON
+        — not as ``str([])`` = ``"[]"``.  Verify the full round-trip
+        through ``execute_tool_calls`` so a future regression in the
+        wiring (e.g. forgetting to use the ToolMessage form for
+        content_and_artifact tools) shows up here.
+        """
+        agent = _make_agent([_make_structured_only_mcp_tool()])
+        out = await agent.execute_tool_calls(
+            [_tc("mcp_structured_only", {"query": "lowest"})], state={}
+        )
+        msg: ToolMessage = out["messages"][0]
+        assert "TOOL_SUCCESS" in msg.content
+        # Pre-fix: msg.content would carry "[]" — the empty content list
+        # stringified.  Post-fix: the artifact's structured content is
+        # surfaced as JSON.
+        assert "[]" not in msg.content.split("TOOL_QUERY")[0].strip().splitlines()[-1]
+        assert out["tool_feedback"].is_success()
+        # The feedback's results must be parseable JSON containing the
+        # structured payload.
+        parsed = json.loads(out["tool_feedback"].success.results)
+        assert parsed == {"deals": 12, "label": "lowest"}
 
 
 class TestBatchRejectionCarriesName:

@@ -197,6 +197,7 @@ class BaseAgent:
         tool_messages: list[ToolMessage] = []
         latest_feedback: ToolFeedback | None = None
         new_retry_attempts = retry_attempts
+        executed_count = 0
 
         # Refuse a multi-tool batch that mixes a pause-capable tool with
         # siblings.  LangGraph replays the entire node on resume, so
@@ -265,6 +266,10 @@ class BaseAgent:
                     "tool_retry_attempts": min(
                         retry_attempts + 1, self.max_tool_retries
                     ),
+                    # No tool actually invoked — the batch was refused
+                    # wholesale.  Reporting 0 lets ``tool_node`` charge
+                    # the per-turn budget by real work, not attempts.
+                    "executed_tool_count": 0,
                 }
 
         for tc in tool_calls:
@@ -281,6 +286,7 @@ class BaseAgent:
                 else getattr(tc, "name", None)
             )
 
+            executed_count += 1
             try:
                 feedback = await self._execute_single_tool(
                     tc, state, previous_errors_str
@@ -348,6 +354,11 @@ class BaseAgent:
             "tool_feedback": latest_feedback,
             "tool_feedback_history": history,
             "tool_retry_attempts": new_retry_attempts,
+            # Real work counter, separate from ``len(tool_calls)``: a
+            # call that was skipped (missing id) does not contribute.
+            # ``tool_node`` charges the per-turn budget by this so
+            # rejected batches don't drain the cap.
+            "executed_tool_count": executed_count,
         }
 
     async def execute_tool_calls_safe(
@@ -375,6 +386,12 @@ class BaseAgent:
                     tool_calls, f"Internal error in tool execution: {e}"
                 ),
                 "tool_retry_attempts": self.max_tool_retries,
+                # Tools didn't run — the fallback ToolMessages exist to
+                # preserve the AIMessage<->ToolMessage pairing invariant,
+                # not to record work.  Charging the budget for them
+                # would let a transient internal bug burn the per-turn
+                # cap with zero useful output.
+                "executed_tool_count": 0,
             }
 
     # ------------------------------------------------------------------

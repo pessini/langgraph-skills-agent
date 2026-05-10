@@ -352,3 +352,55 @@ class TestBatchRejectionCarriesName:
         for m in msgs:
             assert "TOOL_ERROR" in m.content
             assert "BATCH_REJECTED" in m.content
+
+
+class TestExecutedToolCount:
+    """``execute_tool_calls`` must report how many tool calls *actually*
+    executed so ``tool_node`` can charge the budget by real work, not
+    attempts.  The catastrophic-fallback and batch-rejection paths emit
+    ToolMessages without running tools — counting them as executed
+    would let three rejected batches of five drain the 15-call cap to
+    zero useful work."""
+
+    @pytest.mark.asyncio
+    async def test_normal_execution_reports_count(self) -> None:
+        agent = _make_agent([returns_string])
+        out = await agent.execute_tool_calls(
+            [
+                _tc("returns_string", {"query": "x"}, "id-1"),
+                _tc("returns_string", {"query": "y"}, "id-2"),
+            ],
+            state={},
+        )
+        assert out["executed_tool_count"] == 2
+
+    @pytest.mark.asyncio
+    async def test_batch_rejection_reports_zero_executed(self) -> None:
+        agent = _make_agent([pausing_tool, returns_string])
+        out = await agent.execute_tool_calls(
+            [
+                _tc("returns_string", {"query": "x"}, "id-1"),
+                _tc("pausing_tool", {"query": "y"}, "id-2"),
+            ],
+            state={},
+        )
+        # No tool actually invoked — batch was refused wholesale.
+        assert out["executed_tool_count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_catastrophic_fallback_reports_zero_executed(
+        self, monkeypatch
+    ) -> None:
+        agent = _make_agent([returns_string])
+
+        async def boom(*_a, **_kw):
+            raise RuntimeError("wrapper exploded")
+
+        monkeypatch.setattr(agent, "execute_tool_calls", boom)
+
+        out = await agent.execute_tool_calls_safe(
+            [_tc("returns_string", {}, "id-1")], state={}
+        )
+        # Tools didn't run — fallback ToolMessages are bookkeeping, not
+        # work that should drain the budget.
+        assert out["executed_tool_count"] == 0

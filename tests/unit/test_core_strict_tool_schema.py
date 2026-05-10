@@ -34,6 +34,21 @@ def opaque_tool(x: str) -> str:
     return x
 
 
+@tool
+def nested_meta_tool(x: str) -> str:
+    """A tool whose strict opt-in lives under metadata['_meta'].
+
+    This is the shape ``langchain-mcp-adapters`` produces when an MCP
+    server tool is declared with ``@mcp.tool(meta={...})`` — the
+    server-side meta dict is nested under ``_meta`` rather than merged
+    at the top level.
+    """
+    return x
+
+
+nested_meta_tool.metadata = {"_meta": {"strict_schema_compatible": True}}
+
+
 def _fake_model() -> MagicMock:
     model = MagicMock()
     model.bind_tools = MagicMock(return_value=model)
@@ -66,6 +81,31 @@ def test_call_llm_applies_strict_per_tool_when_enabled() -> None:
     assert by_name["strict_compatible_tool"]["strict"] is True
     # Opaque tool keeps strict=False.
     assert by_name["opaque_tool"].get("strict") is not True
+
+
+def test_call_llm_honors_strict_flag_nested_under_meta() -> None:
+    """A tool that opts into strict via ``metadata["_meta"]["strict_schema_compatible"]``
+    (the shape ``langchain-mcp-adapters`` produces from FastMCP's
+    ``@mcp.tool(meta={...})`` argument) must be bound with ``strict=True``,
+    not silently treated as opaque.
+    """
+    fake_model = _fake_model()
+
+    agent = BaseAgent(
+        agent_name="t",
+        model_factory=lambda: fake_model,
+        tools=[nested_meta_tool],
+        strict_tool_schema=True,
+    )
+
+    asyncio.run(agent.call_llm([], system_prompt=""))
+
+    fake_model.bind_tools.assert_called_once()
+    args, kwargs = fake_model.bind_tools.call_args
+    [tool_dicts] = (args or (kwargs.get("tools"),))
+    [td] = tool_dicts
+    assert td["function"]["name"] == "nested_meta_tool"
+    assert td["function"]["strict"] is True
 
 
 def test_call_llm_does_not_pass_strict_when_disabled() -> None:

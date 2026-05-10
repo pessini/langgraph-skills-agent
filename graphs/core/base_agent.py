@@ -128,6 +128,12 @@ class BaseAgent:
         bare ``dict[str, Any]`` properties from a remote MCP server),
         and external MCP tool schemas are server-defined — outside the
         wiring user's control.
+
+        External MCP tools loaded via ``langchain-mcp-adapters`` opt in
+        through FastMCP's ``@mcp.tool(meta={...})`` argument, which the
+        adapter surfaces under ``metadata["_meta"]`` rather than at the
+        top level.  Both shapes are accepted so MCP authors don't have
+        to know which level the adapter chose.
         """
         # Imported lazily so providers/clients that never enable strict
         # don't pay the import cost on every agent construction.
@@ -138,7 +144,11 @@ class BaseAgent:
         out: list[dict[str, Any]] = []
         for t in self.tools:
             metadata = getattr(t, "metadata", None) or {}
-            tool_strict = bool(metadata.get("strict_schema_compatible"))
+            nested = metadata.get("_meta") or {}
+            tool_strict = bool(
+                metadata.get("strict_schema_compatible")
+                or nested.get("strict_schema_compatible")
+            )
             out.append(convert_to_openai_tool(t, strict=tool_strict))
         return out
 

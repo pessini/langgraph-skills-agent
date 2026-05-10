@@ -59,18 +59,37 @@ def test_wrap_falls_through_for_non_text_block_lists() -> None:
     assert "image" in feedback.success.results
 
 
-def test_wrap_falls_through_for_text_blocks_with_extra_keys() -> None:
-    """A list whose dicts have ``type=text`` and ``text:str`` but ALSO
-    carry unrecognised keys (e.g. an ``id`` field) is not pure MCP
-    TextContent — those extra keys may be semantically important and
-    must not be silently dropped by the unwrap branch.
+def test_wrap_unwraps_mcp_text_block_with_langchain_id() -> None:
+    """``langchain-mcp-adapters`` tags every MCP content block with an
+    auto-generated ``id`` (``"lc_<uuid>"``).  Real MCP tool output looks
+    like ``[{"type":"text","text":"...","id":"lc_06c13ef6-..."}, ...]``
+    so the unwrap branch must accept ``id`` as a known plumbing key —
+    otherwise MCP output falls through to ``str(raw)`` and the LLM /
+    downstream consumers see Python *repr* instead of the payload.
     """
     agent = _make_agent()
-    raw = [{"type": "text", "text": "hello", "id": "abc"}]
+    raw = [
+        {"type": "text", "text": '["Enterprise","Mid-Market"]', "id": "lc_abc"},
+    ]
     feedback = agent._wrap_as_tool_feedback(raw)
-    # Falls through to str(raw) so the ``id`` survives in the payload.
     assert feedback.success is not None
-    assert "abc" in feedback.success.results
+    assert feedback.success.results == '["Enterprise","Mid-Market"]'
+
+
+def test_wrap_falls_through_for_text_blocks_with_unknown_keys() -> None:
+    """A block carrying a key outside the allowed set (``type``,
+    ``text``, ``annotations``, ``_meta``, ``id``) is not recognisable
+    MCP TextContent — the extra key may be semantically meaningful, so
+    the unwrap branch must fall through to ``str(raw)`` rather than
+    silently drop it.
+    """
+    agent = _make_agent()
+    raw = [{"type": "text", "text": "x", "rogue": "y"}]
+    feedback = agent._wrap_as_tool_feedback(raw)
+    assert feedback.success is not None
+    # Falls through to str(raw) so the rogue field survives.
+    assert "rogue" in feedback.success.results
+    assert "y" in feedback.success.results
 
 
 def test_wrap_unwraps_mcp_text_blocks_with_annotations() -> None:

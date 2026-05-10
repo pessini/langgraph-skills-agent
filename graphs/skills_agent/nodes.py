@@ -129,8 +129,12 @@ async def tool_node(state: State, runtime: Runtime[Context]) -> dict:
     Delegates to ``BaseAgent.execute_tool_calls_safe`` which guarantees
     that every tool_call gets a paired ToolMessage even on catastrophic
     failure (preserves OpenAI's pairing invariant). The skills_agent-
-    specific ``tool_call_count`` is incremented on top of the base
-    update.
+    specific ``tool_call_count`` is incremented by ``executed_tool_count``
+    — i.e. tool calls that *actually* ran — rather than
+    ``len(last.tool_calls)``.  The base-agent batch-rejection path and
+    the catastrophic-fallback path both emit one ToolMessage per call
+    without invoking any tool; counting those would let three rejected
+    batches of 5 exhaust ``MAX_TOOL_CALLS=15`` with zero useful work.
     """
     last = state["messages"][-1]
     if not isinstance(last, AIMessage) or not last.tool_calls:
@@ -138,7 +142,8 @@ async def tool_node(state: State, runtime: Runtime[Context]) -> dict:
 
     agent = runtime.context.agent
     update = await agent.execute_tool_calls_safe(last.tool_calls, dict(state))
-    update["tool_call_count"] = state.get("tool_call_count", 0) + len(last.tool_calls)
+    executed = update.pop("executed_tool_count", 0)
+    update["tool_call_count"] = state.get("tool_call_count", 0) + executed
     return update
 
 

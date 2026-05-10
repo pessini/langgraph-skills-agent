@@ -80,3 +80,37 @@ class TestPreviousErrorsInjection:
             state={"tool_feedback_history": [_err("e", "c")]},
         )
         assert out["tool_feedback"].is_success()
+
+    @pytest.mark.asyncio
+    async def test_llm_supplied_previous_errors_is_not_overwritten(
+        self,
+    ) -> None:
+        """If the LLM threads ``previous_errors`` through itself (because
+        a future skill tells it to, or because the model decided to), the
+        agent must NOT silently override that value with its own injection.
+
+        Today's behaviour is ``args["previous_errors"] = injected_str``
+        unconditionally — invisible from logs (the redaction step does
+        not diff supplied vs. injected).  The fix uses ``setdefault`` so
+        the LLM's value wins.
+        """
+        agent = _make_agent([echoes_previous_errors])
+        history = [_err("history error", "ctx")]
+        await agent.execute_tool_calls(
+            [
+                {
+                    "id": "tc-1",
+                    "name": "echoes_previous_errors",
+                    "args": {
+                        "query": "q",
+                        "previous_errors": "LLM-supplied wins",
+                    },
+                }
+            ],
+            state={"tool_feedback_history": history},
+        )
+        assert len(_RECEIVED_PREV_ERRORS) == 1
+        prev = _RECEIVED_PREV_ERRORS[0]
+        assert prev == "LLM-supplied wins"
+        # The injected history value must not have leaked through.
+        assert "history error" not in (prev or "")

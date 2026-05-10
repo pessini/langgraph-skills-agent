@@ -9,9 +9,12 @@ Python *repr* that is neither valid JSON nor LLM-friendly.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from core.base_agent import BaseAgent
 from core.feedback import ToolFeedback
+from langchain_core.messages import ToolMessage
 
 
 def _make_agent() -> BaseAgent:
@@ -104,3 +107,90 @@ def test_wrap_unwraps_mcp_text_blocks_with_annotations() -> None:
     feedback = agent._wrap_as_tool_feedback(raw)
     assert feedback.success is not None
     assert feedback.success.results == "first\nsecond"
+
+
+def test_wrap_unwraps_mcp_text_block_with_langchain_index() -> None:
+    """LangChain's ``TextContentBlock`` (``langchain_core.messages.content``)
+    populates ``index`` during streaming.  ``langchain-mcp-adapters`` does
+    not forward it today, but a future minor version that mirrors the
+    upstream LangChain shape would silently regress every MCP tool result
+    to ``str(raw)`` if the unwrap branch did not allow ``index``.  Same
+    regression class as the one v0.2.4 fixed for ``id`` — closed
+    pre-emptively here.
+    """
+    agent = _make_agent()
+    raw = [{"type": "text", "text": "payload", "index": 0}]
+    feedback = agent._wrap_as_tool_feedback(raw)
+    assert feedback.success is not None
+    assert feedback.success.results == "payload"
+
+
+def test_wrap_unwraps_mcp_text_block_with_langchain_extras() -> None:
+    """LangChain's ``TextContentBlock`` carries ``extras`` for
+    provider-specific kwargs.  Forwarding-aware adapter versions would
+    surface it; the unwrap branch must accept it as plumbing the same
+    way ``id`` is treated.
+    """
+    agent = _make_agent()
+    raw = [{"type": "text", "text": "payload", "extras": {"provider": "x"}}]
+    feedback = agent._wrap_as_tool_feedback(raw)
+    assert feedback.success is not None
+    assert feedback.success.results == "payload"
+
+
+def test_wrap_recovers_structured_content_when_content_is_empty() -> None:
+    """An MCP tool that returns ``content=[]`` with
+    ``structuredContent={...}`` is spec-compliant — the structured
+    payload IS the result.  ``langchain-mcp-adapters`` packages this as
+    ``ToolMessage(content=[], artifact={"structured_content": {...}})``
+    when invoked via the tool-call form.  Without this branch
+    ``_wrap_as_tool_feedback`` would emit ``str([])`` = ``"[]"`` and
+    silently drop the data the LLM was asked to reason about.
+    """
+    agent = _make_agent()
+    raw = ToolMessage(
+        content=[],
+        tool_call_id="tc-1",
+        artifact={"structured_content": {"key": "value", "n": 3}},
+    )
+    feedback = agent._wrap_as_tool_feedback(raw)
+
+    assert feedback.success is not None
+    parsed = json.loads(feedback.success.results)
+    assert parsed == {"key": "value", "n": 3}
+
+
+def test_wrap_extracts_text_blocks_from_tool_message() -> None:
+    """A ``ToolMessage`` carrying a populated text-block list (the
+    typical MCP tool case) must still unwrap to the joined payload —
+    not fall through to the empty-content artifact branch and not
+    surface the ToolMessage's repr.
+    """
+    agent = _make_agent()
+    raw = ToolMessage(
+        content=[{"type": "text", "text": "row data here"}],
+        tool_call_id="tc-1",
+        artifact=None,
+    )
+    feedback = agent._wrap_as_tool_feedback(raw)
+    assert feedback.success is not None
+    assert feedback.success.results == "row data here"
+
+
+def test_wrap_unwraps_mcp_text_block_with_index_and_extras() -> None:
+    """Combined: a block with both ``index`` and ``extras`` (alongside
+    other plumbing like ``id``) still unwraps to its text payload.
+    """
+    agent = _make_agent()
+    raw = [
+        {
+            "type": "text",
+            "text": "payload",
+            "id": "lc_abc",
+            "index": 0,
+            "extras": {"provider": "x"},
+        }
+    ]
+    feedback = agent._wrap_as_tool_feedback(raw)
+    assert feedback.success is not None
+    assert feedback.success.results == "payload"

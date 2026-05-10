@@ -8,13 +8,15 @@ guarantee in execute_tool_calls_safe.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
 from core.base_agent import BaseAgent
 from core.feedback import ErrorResponse, ToolFeedback
 from langchain_core.messages import ToolMessage
-from langchain_core.tools import tool
+from langchain_core.tools import StructuredTool, tool
+from pydantic import BaseModel
 
 
 @tool
@@ -277,6 +279,57 @@ def pausing_tool(query: str) -> str:
 pausing_tool.metadata = {"pauses_graph": True}
 
 
+class _StructuredOnlyArgs(BaseModel):
+    query: str
+
+
+def _make_structured_only_mcp_tool() -> StructuredTool:
+    """Stand in for an MCP tool that returns ``content=[]`` plus
+    ``structuredContent={...}`` — ``langchain-mcp-adapters`` packages
+    that as ``([], MCPToolArtifact(...))`` from a coroutine when
+    ``response_format="content_and_artifact"`` is set.
+    """
+
+    async def _call(query: str) -> tuple[list, dict]:
+        # Empty content list — the result lives in the artifact.
+        return [], {"structured_content": {"deals": 12, "label": query}}
+
+    return StructuredTool(
+        name="mcp_structured_only",
+        description="MCP tool that returns only structuredContent",
+        args_schema=_StructuredOnlyArgs,
+        coroutine=_call,
+        response_format="content_and_artifact",
+    )
+
+
+class TestStructuredContentRecovery:
+    @pytest.mark.asyncio
+    async def test_structured_content_round_trips_as_json(self) -> None:
+        """A spec-compliant MCP tool that returns ``content=[]`` with
+        ``structuredContent={...}`` must reach the LLM as parseable JSON
+        — not as ``str([])`` = ``"[]"``.  Verify the full round-trip
+        through ``execute_tool_calls`` so a future regression in the
+        wiring (e.g. forgetting to use the ToolMessage form for
+        content_and_artifact tools) shows up here.
+        """
+        agent = _make_agent([_make_structured_only_mcp_tool()])
+        out = await agent.execute_tool_calls(
+            [_tc("mcp_structured_only", {"query": "lowest"})], state={}
+        )
+        msg: ToolMessage = out["messages"][0]
+        assert "TOOL_SUCCESS" in msg.content
+        # Pre-fix: msg.content would carry "[]" — the empty content list
+        # stringified.  Post-fix: the artifact's structured content is
+        # surfaced as JSON.
+        assert "[]" not in msg.content.split("TOOL_QUERY")[0].strip().splitlines()[-1]
+        assert out["tool_feedback"].is_success()
+        # The feedback's results must be parseable JSON containing the
+        # structured payload.
+        parsed = json.loads(out["tool_feedback"].success.results)
+        assert parsed == {"deals": 12, "label": "lowest"}
+
+
 class TestBatchRejectionCarriesName:
     @pytest.mark.asyncio
     async def test_each_refusal_carries_its_originating_tool_name(self) -> None:
@@ -299,3 +352,92 @@ class TestBatchRejectionCarriesName:
         for m in msgs:
             assert "TOOL_ERROR" in m.content
             assert "BATCH_REJECTED" in m.content
+
+
+class TestExecutedToolCount:
+    """``execute_tool_calls`` must report how many tool calls *actually*
+    executed so ``tool_node`` can charge the budget by real work, not
+    attempts.  The catastrophic-fallback and batch-rejection paths emit
+    ToolMessages without running tools — counting them as executed
+    would let three rejected batches of five drain the 15-call cap to
+    zero useful work."""
+
+    @pytest.mark.asyncio
+    async def test_normal_execution_reports_count(self) -> None:
+        agent = _make_agent([returns_string])
+        out = await agent.execute_tool_calls(
+            [
+                _tc("returns_string", {"query": "x"}, "id-1"),
+                _tc("returns_string", {"query": "y"}, "id-2"),
+            ],
+            state={},
+        )
+        assert out["executed_tool_count"] == 2
+
+    @pytest.mark.asyncio
+    async def test_batch_rejection_reports_zero_executed(self) -> None:
+        agent = _make_agent([pausing_tool, returns_string])
+        out = await agent.execute_tool_calls(
+            [
+                _tc("returns_string", {"query": "x"}, "id-1"),
+                _tc("pausing_tool", {"query": "y"}, "id-2"),
+            ],
+            state={},
+        )
+        # No tool actually invoked — batch was refused wholesale.
+        assert out["executed_tool_count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_catastrophic_fallback_reports_zero_executed(
+        self, monkeypatch
+    ) -> None:
+        agent = _make_agent([returns_string])
+
+        async def boom(*_a, **_kw):
+            raise RuntimeError("wrapper exploded")
+
+        monkeypatch.setattr(agent, "execute_tool_calls", boom)
+
+        out = await agent.execute_tool_calls_safe(
+            [_tc("returns_string", {}, "id-1")], state={}
+        )
+        # Tools didn't run — fallback ToolMessages are bookkeeping, not
+        # work that should drain the budget.
+        assert out["executed_tool_count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_unknown_tool_does_not_count_as_executed(self) -> None:
+        """``TOOL_NOT_FOUND`` is the same category as batch-rejection and
+        catastrophic-fallback: a ``ToolMessage`` is emitted to satisfy
+        the AIMessage<->ToolMessage pairing invariant, but no tool was
+        actually invoked.  Charging the per-turn budget for it would let
+        an LLM that hallucinates non-existent tool names drain
+        ``MAX_TOOL_CALLS`` to zero useful work — the same bug class
+        Fix 5 was meant to close.
+        """
+        agent = _make_agent([returns_string])
+        out = await agent.execute_tool_calls(
+            [_tc("does_not_exist", {}, "id-1")], state={}
+        )
+        # Pre-fix: executed_tool_count == 1 (incremented before the
+        # name-lookup branch returned TOOL_NOT_FOUND).
+        assert out["executed_tool_count"] == 0
+        # ToolMessage still emitted to keep the pairing invariant.
+        assert len(out["messages"]) == 1
+        assert "TOOL_NOT_FOUND" in out["messages"][0].content
+
+    @pytest.mark.asyncio
+    async def test_mixed_known_and_unknown_counts_only_known(self) -> None:
+        """A batch with one valid tool and one unknown name must charge
+        the budget by 1 (the valid invocation), not 2.
+        """
+        agent = _make_agent([returns_string])
+        out = await agent.execute_tool_calls(
+            [
+                _tc("returns_string", {"query": "x"}, "id-1"),
+                _tc("does_not_exist", {}, "id-2"),
+            ],
+            state={},
+        )
+        assert out["executed_tool_count"] == 1
+        assert len(out["messages"]) == 2

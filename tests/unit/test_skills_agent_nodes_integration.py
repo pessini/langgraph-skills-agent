@@ -138,6 +138,50 @@ class TestSkillsAgentNodes:
         assert update["tool_call_count"] == 5  # 3 + 2 calls
         assert len(update["messages"]) == 2
 
+    @pytest.mark.asyncio
+    async def test_tool_node_does_not_charge_for_rejected_batch(
+        self, patched_context, monkeypatch
+    ) -> None:
+        """The base-agent batch-rejection path returns one ToolMessage per
+        call without executing any tool.  ``tool_node`` must charge
+        ``tool_call_count`` only by actual executions — otherwise three
+        rejected batches of 5 exhaust MAX_TOOL_CALLS=15 with zero work.
+        """
+        runtime = _FakeRuntime(context=patched_context)
+        await patched_context.initialize()
+
+        # Stub execute_tool_calls_safe to mimic the batch-rejection
+        # contract: ToolMessages emitted, but executed_tool_count=0.
+        from langchain_core.messages import ToolMessage as TM
+
+        async def fake_safe(_tool_calls, _state):
+            return {
+                "messages": [
+                    TM(content="rejected", tool_call_id="x", name="echo_tool"),
+                    TM(content="rejected", tool_call_id="y", name="echo_tool"),
+                ],
+                "executed_tool_count": 0,
+            }
+
+        monkeypatch.setattr(
+            patched_context.agent, "execute_tool_calls_safe", fake_safe
+        )
+
+        ai_with_calls = AIMessage(
+            content="",
+            tool_calls=[
+                {"id": "x", "name": "echo_tool", "args": {}},
+                {"id": "y", "name": "echo_tool", "args": {}},
+            ],
+        )
+        state: State = {  # type: ignore[typeddict-item]
+            "messages": [HumanMessage(content="go"), ai_with_calls],
+            "tool_call_count": 7,
+        }
+        update = await nodes_module.tool_node(state, runtime)
+        # Pre-fix this would be 7 + 2 = 9 even though no tools ran.
+        assert update["tool_call_count"] == 7
+
     def test_should_continue_blocks_when_projected_exceeds_cap(self) -> None:
         """count=14 + 2 pending tool_calls would push past MAX_TOOL_CALLS=15;
         must route to error_summary instead of letting the cap be busted."""

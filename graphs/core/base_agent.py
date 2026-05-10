@@ -23,6 +23,7 @@ metrics sink (default is no-op).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import Callable
 from typing import Any
@@ -196,6 +197,7 @@ class BaseAgent:
         tool_messages: list[ToolMessage] = []
         latest_feedback: ToolFeedback | None = None
         new_retry_attempts = retry_attempts
+        executed_count = 0
 
         # Refuse a multi-tool batch that mixes a pause-capable tool with
         # siblings.  LangGraph replays the entire node on resume, so
@@ -264,6 +266,10 @@ class BaseAgent:
                     "tool_retry_attempts": min(
                         retry_attempts + 1, self.max_tool_retries
                     ),
+                    # No tool actually invoked — the batch was refused
+                    # wholesale.  Reporting 0 lets ``tool_node`` charge
+                    # the per-turn budget by real work, not attempts.
+                    "executed_tool_count": 0,
                 }
 
         for tc in tool_calls:
@@ -281,7 +287,7 @@ class BaseAgent:
             )
 
             try:
-                feedback = await self._execute_single_tool(
+                feedback, did_invoke = await self._execute_single_tool(
                     tc, state, previous_errors_str
                 )
             except GraphBubbleUp:
@@ -291,7 +297,10 @@ class BaseAgent:
             except Exception as e:
                 # Should not normally fire — _execute_single_tool catches
                 # tool-side exceptions itself. This is a defensive net for
-                # bugs in the wrapper.
+                # bugs in the wrapper (e.g. ``_inject_state_args`` raising
+                # KeyError on a missing InjectedState field, which
+                # propagates *before* the inner try/except and so isn't
+                # an actual tool invocation — ``did_invoke=False``).
                 logger.exception(
                     "execute_tool_calls_unexpected agent=%s id=%s",
                     self.agent_name,
@@ -305,6 +314,9 @@ class BaseAgent:
                         context="execute_tool_calls wrapper",
                     )
                 )
+                did_invoke = False
+            if did_invoke:
+                executed_count += 1
 
             latest_feedback = feedback
             history.append(feedback)
@@ -347,6 +359,11 @@ class BaseAgent:
             "tool_feedback": latest_feedback,
             "tool_feedback_history": history,
             "tool_retry_attempts": new_retry_attempts,
+            # Real work counter, separate from ``len(tool_calls)``: a
+            # call that was skipped (missing id) does not contribute.
+            # ``tool_node`` charges the per-turn budget by this so
+            # rejected batches don't drain the cap.
+            "executed_tool_count": executed_count,
         }
 
     async def execute_tool_calls_safe(
@@ -374,6 +391,12 @@ class BaseAgent:
                     tool_calls, f"Internal error in tool execution: {e}"
                 ),
                 "tool_retry_attempts": self.max_tool_retries,
+                # Tools didn't run — the fallback ToolMessages exist to
+                # preserve the AIMessage<->ToolMessage pairing invariant,
+                # not to record work.  Charging the budget for them
+                # would let a transient internal bug burn the per-turn
+                # cap with zero useful output.
+                "executed_tool_count": 0,
             }
 
     # ------------------------------------------------------------------
@@ -397,10 +420,26 @@ class BaseAgent:
         extra_reset_fields: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Merge per-turn reset fields into ``update`` when a new user turn
-        began. ``tool_feedback_history`` is intentionally preserved."""
+        began.
+
+        Resets:
+
+        - ``tool_retry_attempts`` to 0 (avoid stale retry-budget exhaustion).
+        - ``tool_feedback`` to ``None``.
+        - ``tool_feedback_history`` to ``[]`` so prior-turn errors don't
+          leak into the next turn's ``previous_errors`` injection at
+          ``_serialize_previous_errors``.  The history was previously
+          preserved "for analytics", but analytics consume LangFuse
+          traces or Aegra checkpoints — not in-memory graph state.
+          Carrying a turn-1 error into turn 2's first tool call (where
+          the user's question is unrelated) tells the LLM to avoid
+          problems it isn't currently exhibiting and silently degrades
+          multi-turn quality.
+        """
         if is_new_human_turn:
             update["tool_retry_attempts"] = 0
             update["tool_feedback"] = None
+            update["tool_feedback_history"] = []
             if extra_reset_fields:
                 update.update(extra_reset_fields)
         return update
@@ -445,7 +484,18 @@ class BaseAgent:
         tc: dict[str, Any] | Any,
         state: dict[str, Any],
         previous_errors_str: str | None,
-    ) -> ToolFeedback:
+    ) -> tuple[ToolFeedback, bool]:
+        """Run one tool call and return ``(feedback, did_invoke)``.
+
+        ``did_invoke`` is False when the call returned without
+        reaching the underlying tool (today: only ``TOOL_NOT_FOUND``;
+        kept as a flag rather than coupling the caller to a string
+        ``error_type`` so future no-invoke branches can opt in
+        without changing call sites).  ``execute_tool_calls`` reads
+        the flag to decide whether to charge the per-turn budget —
+        same intent as Fix 5 generalised to every "ToolMessage emitted
+        but tool didn't run" path.
+        """
         import time
 
         name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None)
@@ -456,13 +506,16 @@ class BaseAgent:
             logger.error(
                 "tool_not_found agent=%s tool=%s", self.agent_name, name
             )
-            return ToolFeedback(
-                error=ErrorResponse(
-                    error_type="TOOL_NOT_FOUND",
-                    message=f"Unknown tool '{name}'.",
-                    retryable=False,
-                    context=None,
-                )
+            return (
+                ToolFeedback(
+                    error=ErrorResponse(
+                        error_type="TOOL_NOT_FOUND",
+                        message=f"Unknown tool '{name}'.",
+                        retryable=False,
+                        context=None,
+                    )
+                ),
+                False,
             )
 
         tool_func = self.tools_by_name[name]
@@ -478,7 +531,14 @@ class BaseAgent:
         injected_names = self._inject_state_args(tool_func, args, state)
 
         if previous_errors_str and self._tool_accepts(tool_func, "previous_errors"):
-            args["previous_errors"] = previous_errors_str
+            # ``setdefault`` so an LLM-supplied ``previous_errors`` wins.
+            # The injection is a backstop for tools that need self-
+            # correction context the LLM didn't explicitly thread
+            # through; if the LLM already provided it, that value is
+            # authoritative.  Pre-fix, ``args[k] = v`` clobbered silently
+            # — invisible from logs, since the redaction step doesn't
+            # diff supplied-vs-injected args.
+            args.setdefault("previous_errors", previous_errors_str)
 
         self.on_tool_event(
             {
@@ -491,7 +551,30 @@ class BaseAgent:
 
         start = time.perf_counter()
         try:
-            raw = await self._ainvoke_tool_with_retry(tool_func, args)
+            # Tools declaring response_format="content_and_artifact" — the
+            # langchain-mcp-adapters wiring uses this so each tool call
+            # returns ``(content, artifact)`` — must be invoked via the
+            # ToolMessage form.  Otherwise ``BaseTool._format_output``
+            # short-circuits when ``tool_call_id`` is absent and returns
+            # *only* the content, dropping the artifact (which carries
+            # MCP ``structuredContent`` for tools that return ``content=[]``
+            # plus a structured payload).  Other tools keep the legacy
+            # plain-args form so existing return shapes (``ToolFeedback``,
+            # plain dicts, plain strings) are not affected — switching
+            # everyone to the ToolMessage form would force ``_format_output``
+            # to ``json.dumps`` non-content returns and break the
+            # passthrough contract for ``ToolFeedback``.
+            response_format = getattr(tool_func, "response_format", "content")
+            if response_format == "content_and_artifact":
+                invoke_payload: dict[str, Any] = {
+                    "args": args,
+                    "id": tool_call_id,
+                    "name": name,
+                    "type": "tool_call",
+                }
+            else:
+                invoke_payload = args
+            raw = await self._ainvoke_tool_with_retry(tool_func, invoke_payload)
             feedback = self._wrap_as_tool_feedback(raw)
             duration_ms = int((time.perf_counter() - start) * 1000)
             self.on_tool_event(
@@ -502,7 +585,7 @@ class BaseAgent:
                     "duration_ms": duration_ms,
                 }
             )
-            return feedback
+            return feedback, True
         except GraphBubbleUp:
             # interrupt()/Command propagation: not a tool failure.
             # If the tool raised this without declaring itself
@@ -543,13 +626,19 @@ class BaseAgent:
                     "error": str(e),
                 }
             )
-            return ToolFeedback(
-                error=ErrorResponse(
-                    error_type="EXECUTION_ERROR",
-                    message=str(e),
-                    retryable=True,
-                    context="internal tool wrapper",
-                )
+            # ``did_invoke=True``: control reached ``tool.ainvoke`` —
+            # the tool ran and raised, so the call drained real
+            # resources and should charge the per-turn budget.
+            return (
+                ToolFeedback(
+                    error=ErrorResponse(
+                        error_type="EXECUTION_ERROR",
+                        message=str(e),
+                        retryable=True,
+                        context="internal tool wrapper",
+                    )
+                ),
+                True,
             )
 
     def _wrap_as_tool_feedback(self, raw: Any) -> ToolFeedback:
@@ -557,6 +646,21 @@ class BaseAgent:
 
         Cases:
         - already a ``ToolFeedback`` → passthrough.
+        - a ``ToolMessage`` (the shape returned for tools declaring
+          ``response_format="content_and_artifact"`` — i.e. MCP tools
+          via ``langchain-mcp-adapters``).  Two sub-cases:
+
+          1. ``content`` is empty / ``None`` and ``artifact`` carries
+             ``structured_content`` → emit the structured payload as
+             JSON.  This covers the spec-compliant MCP tool that
+             returns ``content=[]`` with ``structuredContent={...}``.
+             Without this branch the result would surface as
+             ``str([])`` = ``"[]"`` and the LLM would see an empty
+             list literal where the actual data lives.
+
+          2. ``content`` is populated → recurse on ``content`` so the
+             text-block / fallback branches handle it as if the tool
+             had returned the content directly.
         - a ``dict`` matching the shape → ``ToolFeedback(**raw)``.
         - a list of MCP TextContent blocks
           (``[{"type": "text", "text": "..."}, ...]`` per the MCP spec)
@@ -567,14 +671,29 @@ class BaseAgent:
           neither valid JSON nor LLM-friendly.  Concatenation gives
           downstream consumers (and the LLM on the next turn) the
           actual text payload.  The shape check requires keys be a
-          subset of MCP TextContent's ``{type, text, annotations,
-          _meta}`` so a non-MCP tool that returns dicts with extra
-          fields (e.g. an ``id`` alongside ``text``) doesn't get its
-          fields silently dropped.
+          subset of MCP TextContent's allowed plumbing set so a
+          non-MCP tool that returns dicts with extra fields (e.g. a
+          ``"rogue"`` field that may be semantically meaningful) does
+          not get its fields silently dropped.
         - anything else → ``SuccessResponse(results=str(raw))``.
         """
         if isinstance(raw, ToolFeedback):
             return raw
+        if isinstance(raw, ToolMessage):
+            artifact = getattr(raw, "artifact", None)
+            content = raw.content
+            if (not content) and isinstance(artifact, dict):
+                structured = artifact.get("structured_content")
+                if structured is not None:
+                    return ToolFeedback(
+                        success=SuccessResponse(
+                            results=json.dumps(structured, ensure_ascii=False)
+                        )
+                    )
+            # Fall through: process the inner content as if the tool
+            # had returned it directly.  This keeps the text-block
+            # unwrap logic in one place.
+            raw = content
         if isinstance(raw, dict):
             try:
                 return ToolFeedback(**raw)
@@ -598,14 +717,21 @@ class BaseAgent:
         """True iff ``b`` matches MCP TextContent strictly.
 
         Per the MCP spec, TextContent has ``type``, ``text``, and
-        optionally ``annotations`` / ``_meta``.  ``id`` is also
-        permitted because ``langchain-mcp-adapters`` always tags each
-        block with an auto-generated ``id`` like ``"lc_<uuid>"`` —
-        without ``id`` in the allowed set, real MCP tool output would
-        fail this heuristic, fall through to ``str(raw)``, and surface
-        as a Python *repr* the LLM and downstream consumers can't
-        parse.  The ``id`` is plumbing, not payload, and is safely
-        droppable when concatenating text.
+        optionally ``annotations`` / ``_meta``.  ``id``, ``index``, and
+        ``extras`` are also permitted because they are LangChain
+        plumbing that ``langchain-mcp-adapters`` may attach to each
+        block: ``id`` is already populated today (auto-generated
+        ``"lc_<uuid>"``), and ``index`` / ``extras`` are part of
+        upstream LangChain's ``TextContentBlock`` TypedDict
+        (``langchain_core.messages.content.create_text_block``) —
+        ``index`` is set during streaming, ``extras`` carries
+        provider-specific kwargs.  Today's adapter version doesn't
+        forward ``index``/``extras``, but a future minor bump that
+        mirrors the upstream type would silently regress every MCP
+        tool result to ``str(raw)`` if these keys were not in the
+        allow-list — the same regression class v0.2.4 just fixed for
+        ``id``, closed pre-emptively here.  All three are plumbing,
+        not payload, and are safely droppable when concatenating text.
 
         Requiring a strict subset still prevents accidentally
         collapsing a non-MCP tool return whose dicts carry
@@ -616,7 +742,8 @@ class BaseAgent:
             isinstance(b, dict)
             and b.get("type") == "text"
             and isinstance(b.get("text"), str)
-            and set(b.keys()) <= {"type", "text", "annotations", "_meta", "id"}
+            and set(b.keys())
+            <= {"type", "text", "annotations", "_meta", "id", "index", "extras"}
         )
 
     # ------------------------------------------------------------------

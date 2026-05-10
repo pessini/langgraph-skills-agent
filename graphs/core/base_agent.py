@@ -598,16 +598,25 @@ class BaseAgent:
         """True iff ``b`` matches MCP TextContent strictly.
 
         Per the MCP spec, TextContent has ``type``, ``text``, and
-        optionally ``annotations`` / ``_meta``.  Requiring a strict
-        subset prevents accidentally collapsing a non-MCP tool's
-        ``[{"type":"text","text":"x","id":"abc"}, ...]`` (which carries
-        an ``id`` we'd silently drop) into a flat string.
+        optionally ``annotations`` / ``_meta``.  ``id`` is also
+        permitted because ``langchain-mcp-adapters`` always tags each
+        block with an auto-generated ``id`` like ``"lc_<uuid>"`` —
+        without ``id`` in the allowed set, real MCP tool output would
+        fail this heuristic, fall through to ``str(raw)``, and surface
+        as a Python *repr* the LLM and downstream consumers can't
+        parse.  The ``id`` is plumbing, not payload, and is safely
+        droppable when concatenating text.
+
+        Requiring a strict subset still prevents accidentally
+        collapsing a non-MCP tool return whose dicts carry
+        unrecognised keys (e.g. a ``"rogue"`` field that may be
+        semantically meaningful) into a flat string.
         """
         return (
             isinstance(b, dict)
             and b.get("type") == "text"
             and isinstance(b.get("text"), str)
-            and set(b.keys()) <= {"type", "text", "annotations", "_meta"}
+            and set(b.keys()) <= {"type", "text", "annotations", "_meta", "id"}
         )
 
     # ------------------------------------------------------------------

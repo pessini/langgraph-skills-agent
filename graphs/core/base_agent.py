@@ -495,7 +495,14 @@ class BaseAgent:
         injected_names = self._inject_state_args(tool_func, args, state)
 
         if previous_errors_str and self._tool_accepts(tool_func, "previous_errors"):
-            args["previous_errors"] = previous_errors_str
+            # ``setdefault`` so an LLM-supplied ``previous_errors`` wins.
+            # The injection is a backstop for tools that need self-
+            # correction context the LLM didn't explicitly thread
+            # through; if the LLM already provided it, that value is
+            # authoritative.  Pre-fix, ``args[k] = v`` clobbered silently
+            # — invisible from logs, since the redaction step doesn't
+            # diff supplied-vs-injected args.
+            args.setdefault("previous_errors", previous_errors_str)
 
         self.on_tool_event(
             {

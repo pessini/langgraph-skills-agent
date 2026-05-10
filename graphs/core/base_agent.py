@@ -478,10 +478,18 @@ class BaseAgent:
     def _wrap_as_tool_feedback(self, raw: Any) -> ToolFeedback:
         """Normalize a tool's return into ``ToolFeedback``.
 
-        Three cases (see module docstring of ``core.feedback``):
-        - already a ``ToolFeedback`` → passthrough
-        - a ``dict`` matching the shape → ``ToolFeedback(**raw)``
-        - anything else → ``SuccessResponse(results=str(raw))``
+        Cases:
+        - already a ``ToolFeedback`` → passthrough.
+        - a ``dict`` matching the shape → ``ToolFeedback(**raw)``.
+        - a list of MCP-style text content blocks
+          (``[{"type": "text", "text": "..."}, ...]``) → concatenate the
+          ``text`` payloads.  This is what ``langchain-mcp-adapters``
+          returns when an MCP tool reply has no ``structuredContent``;
+          using ``str(raw)`` here would emit a Python *repr* (single
+          quotes, escaped strings) that's neither valid JSON nor
+          LLM-friendly.  Concatenation gives downstream consumers
+          (and the LLM on the next turn) the actual text payload.
+        - anything else → ``SuccessResponse(results=str(raw))``.
         """
         if isinstance(raw, ToolFeedback):
             return raw
@@ -494,6 +502,18 @@ class BaseAgent:
                 # Other exception types are propagated (a real bug, not
                 # a shape mismatch).
                 return ToolFeedback(success=SuccessResponse(results=str(raw)))
+        if (
+            isinstance(raw, list)
+            and raw
+            and all(
+                isinstance(b, dict)
+                and b.get("type") == "text"
+                and isinstance(b.get("text"), str)
+                for b in raw
+            )
+        ):
+            joined = "\n".join(b["text"] for b in raw)
+            return ToolFeedback(success=SuccessResponse(results=joined))
         return ToolFeedback(success=SuccessResponse(results=str(raw)))
 
     # ------------------------------------------------------------------

@@ -64,7 +64,7 @@ class TestWithTurnReset:
         turn errors don't leak into the next turn's ``previous_errors``
         injection at ``_serialize_previous_errors``.  Preserving the
         history "for analytics" was a false promise — analytics belongs
-        in LangFuse traces or Aegra checkpoints, not in-memory state.
+        in LangFuse traces or LangGraph checkpoints, not in-memory state.
         """
         history = [
             ToolFeedback(

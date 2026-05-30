@@ -19,7 +19,7 @@ entries and forwards them as the ``previous_errors`` kwarg to any tool
 that declares the field — enabling self-correction. ``with_turn_reset``
 clears it on every new ``HumanMessage`` so prior-turn errors don't
 pollute the next turn's tool calls; longitudinal analytics consume
-LangFuse traces or Aegra checkpoints rather than in-memory graph state.
+LangFuse traces or LangGraph checkpoints rather than in-memory graph state.
 """
 
 from __future__ import annotations

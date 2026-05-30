@@ -8,29 +8,88 @@ Demonstrates progressive knowledge loading, skill-based domain modularization, a
 >
 > - Introduced a reusable async `BaseAgent` (`graphs/core/`) with LLM retry classification (transient vs permanent), tool-call pairing safety, and Langfuse-managed prompts.
 > - Split `skills_agent` into typed state + slim nodes, replacing the original monolithic `utils/nodes.py`.
-> - Stopped vendoring the Aegra runtime — the FastAPI server, persistence, and migrations are now installed via `aegra-cli`, keeping only the graphs and tests in this repo.
+> - The original article described running the agent through Aegra; this repo now runs directly on LangGraph's local dev server for agent testing, with only the graph code and tests kept here.
 >
 > The Agent Skills concepts in the article still apply; the surrounding implementation has been hardened and simplified.
 
 ## How it runs
 
-This repo is a thin overlay on top of [Aegra](https://github.com/ibbybuilds/aegra) — the FastAPI server, persistence, and migrations are installed via `aegra-cli`. The local code is just:
+This repo is a LangGraph application. The local code is:
 
 ```text
-aegra.json          # graph registration
+langgraph.json      # LangGraph dev/server configuration
 graphs/core/        # reusable BaseAgent
 graphs/skills_agent/ # the demo agent + skills
 tests/              # unit tests for graphs/
 ```
 
-`make install` pulls the latest `aegra-cli`. The repo was last verified against `0.7.2` (see the comment in `pyproject.toml`). Don't vendor upstream source here — patch upstream and re-run `make install` instead.
+`langgraph.json` registers `skills_agent` from `./graphs/skills_agent/agent.py:graph`
+and loads environment variables from `./.env`. The graph code remains pure
+LangGraph: `StateGraph`, typed state, runtime context, tool nodes, and
+interrupt/resume behavior live under `graphs/`.
 
 ## Quick start
 
 ```bash
 make install
-cp .env.example .env  # set OPENAI_API_KEY
-make dev              # runs on http://localhost:4242
+cp .env.example .env  # set OPENAI_API_KEY, or use Ollama defaults
+make dev              # runs on http://127.0.0.1:2024
+```
+
+LangGraph Studio is available while the dev server is running:
+
+```text
+https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024
+```
+
+## Local smoke checks
+
+With `make dev` running, confirm the graph is registered:
+
+```bash
+curl -s -X POST http://127.0.0.1:2024/assistants/search \
+  -H 'content-type: application/json' \
+  -d '{}'
+```
+
+The response should include `"graph_id":"skills_agent"`. For endpoints that
+accept a graph ID, use `skills_agent` directly:
+
+```bash
+curl -s http://127.0.0.1:2024/assistants/skills_agent/graph
+```
+
+Some endpoints require the assistant UUID returned by `/assistants/search`
+instead of the graph ID, such as `/assistants/{assistant_id}/schemas`.
+
+To run a live LLM smoke test through the SDK:
+
+```bash
+uv run --with langgraph-sdk python - <<'PY'
+import asyncio
+from langgraph_sdk import get_client
+
+
+async def main():
+    client = get_client(url="http://127.0.0.1:2024")
+    thread = await client.threads.create()
+    result = await client.runs.wait(
+        thread["thread_id"],
+        "skills_agent",
+        input={
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Say hello and name one skill you can load.",
+                }
+            ]
+        },
+    )
+    print(result["messages"][-1]["content"])
+
+
+asyncio.run(main())
+PY
 ```
 
 ## Tests
@@ -42,5 +101,4 @@ make test
 ## Credits
 
 - [LangGraph](https://github.com/langchain-ai/langgraph) by LangChain
-- [Aegra](https://github.com/ibbybuilds/aegra) by Muhammad Ibrahim
 - [n8n Skills Repository](https://github.com/haunchen/n8n-skills/) by haunchen

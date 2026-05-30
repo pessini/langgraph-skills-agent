@@ -33,6 +33,7 @@ Responsibilities:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -270,7 +271,7 @@ class Context:
             scan_start = time.perf_counter()
             log_progressive({"tier": 1, "event": "catalog.scan.start"})
             self._skill_store = SkillStore(self.skills_dir)
-            self._skill_store.scan()
+            await asyncio.to_thread(self._skill_store.scan)
             logger.info(
                 "Skill store initialized with %d skills",
                 len(self._skill_store.get_skill_names()),

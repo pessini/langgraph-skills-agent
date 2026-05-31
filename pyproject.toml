@@ -1,7 +1,7 @@
 # Local runtime is provided by LangGraph CLI via `make dev`.
 [project]
 name = "langgraph-skills-agent"
-version = "0.2.5"
+version = "0.2.6"
 description = "Demo agent for the Medium article on progressive Agent Skills in LangGraph."
 requires-python = ">=3.11"
 dependencies = [

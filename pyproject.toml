@@ -25,6 +25,16 @@ dev = [
 [tool.uv]
 package = false
 
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["graphs"]
+
+[tool.setuptools.package-data]
+"skills_agent" = ["skills/**/*.md"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"

@@ -12,6 +12,7 @@ Verifies that:
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from typing import Any
 
@@ -237,7 +238,7 @@ class TestSkillsAgentNodes:
 class TestContextInitDecorator:
     """Regression: every node must self-initialize Context.
 
-    Aegra creates a fresh Context per request. The HITL resume path
+    LangGraph dev/server hosts create a fresh Context per request. The HITL resume path
     re-enters tool_node (or error_summary_node) directly with that
     fresh Context, never having gone through agent_node — which is
     where init used to live. Without the decorator, the node raises
@@ -248,7 +249,7 @@ class TestContextInitDecorator:
     async def test_tool_node_initializes_uninitialized_context(
         self, patched_context
     ) -> None:
-        # Critical: do NOT pre-initialize. This mirrors what Aegra does
+        # Critical: do NOT pre-initialize. This mirrors what the server does
         # on resume from interrupt — fresh Context, entry at tool_node.
         assert patched_context._skill_store is None
 
@@ -303,6 +304,87 @@ class TestContextInitDecorator:
         await nodes_module.agent_node(state, runtime)
 
         assert patched_context._skill_store is cached_store
+
+    @pytest.mark.asyncio
+    async def test_context_initialize_scans_skills_off_event_loop(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """LangGraph dev rejects blocking filesystem scans on the event loop."""
+        from skills_agent.skills import SkillStore
+
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        event_loop_thread = threading.get_ident()
+        scan_thread: int | None = None
+
+        def fake_scan(self: SkillStore) -> dict:
+            nonlocal scan_thread
+            scan_thread = threading.get_ident()
+            self._scanned = True
+            return self._metadata_cache
+
+        async def fake_external_tools() -> list:
+            return []
+
+        monkeypatch.setattr(SkillStore, "scan", fake_scan)
+        monkeypatch.setattr(
+            "skills_agent.tools.create_skill_tools", lambda _store: []
+        )
+        monkeypatch.setattr(
+            config_module, "_load_external_mcp_tools", fake_external_tools
+        )
+
+        ctx = Context(skills_dir=str(skills_dir), provider="ollama")
+        await ctx.initialize()
+
+        assert scan_thread is not None
+        assert scan_thread != event_loop_thread
+
+    @pytest.mark.asyncio
+    async def test_agent_node_builds_skill_catalog_off_event_loop(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """Prompt catalog rendering also walks files and must not block."""
+        from skills_agent.skills import SkillStore
+
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        event_loop_thread = threading.get_ident()
+        catalog_thread: int | None = None
+        scripted = _ScriptedModel([AIMessage(content="ok")])
+
+        def fake_catalog(self: SkillStore) -> str:
+            nonlocal catalog_thread
+            catalog_thread = threading.get_ident()
+            return "catalog"
+
+        async def fake_external_tools() -> list:
+            return []
+
+        monkeypatch.setattr(
+            config_module, "_load_chat_model", lambda *_a, **_kw: scripted
+        )
+        monkeypatch.setattr(
+            "skills_agent.tools.create_skill_tools", lambda _store: []
+        )
+        monkeypatch.setattr(
+            config_module, "_load_external_mcp_tools", fake_external_tools
+        )
+        monkeypatch.setattr(SkillStore, "get_skill_catalog", fake_catalog)
+
+        ctx = Context(skills_dir=str(skills_dir), provider="ollama")
+        runtime = _FakeRuntime(context=ctx)
+        state: State = {  # type: ignore[typeddict-item]
+            "messages": [HumanMessage(content="hello")],
+            "tool_retry_attempts": 0,
+            "tool_call_count": 0,
+            "tool_feedback": None,
+            "tool_feedback_history": [],
+        }
+        await nodes_module.agent_node(state, runtime)
+
+        assert catalog_thread is not None
+        assert catalog_thread != event_loop_thread
 
 
 class TestStrictToolSchemaWiring:

@@ -13,6 +13,7 @@ lives in ``core.BaseAgent``. This file is the thin policy layer:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -33,7 +34,7 @@ logger = logging.getLogger(__name__)
 # Per-request Context initialization
 # ---------------------------------------------------------------------------
 #
-# Aegra (and any LangGraph platform host) instantiates a fresh ``Context``
+# LangGraph dev/server hosts instantiate a fresh ``Context``
 # per request, with ``_skill_store`` / ``_tools`` / ``_agent`` all None
 # until ``await ctx.initialize()`` runs. The first node entered must do
 # that init.
@@ -42,8 +43,8 @@ logger = logging.getLogger(__name__)
 # normal __start__ path, FALSE for resume-from-interrupt: when the user
 # resolves a ``request_human_review`` interrupt, the graph re-enters at
 # ``tool_node`` with a brand-new uninitialized Context and ``ctx.agent``
-# raises ``RuntimeError("Context not initialized")``. Aegra marks the run
-# errored and the HITL flow breaks silently from the user's perspective.
+# raises ``RuntimeError("Context not initialized")``. The server marks the
+# run errored and the HITL flow breaks silently from the user's perspective.
 #
 # The decorator below makes initialization a structural property of every
 # graph node rather than something each node author has to remember.
@@ -110,9 +111,10 @@ async def agent_node(state: State, runtime: Runtime[Context]) -> dict:
     ctx = runtime.context
     agent = ctx.agent
     is_new = agent.is_new_human_turn(state["messages"])
+    skill_catalog = await asyncio.to_thread(ctx.skill_store.get_skill_catalog)
     system_prompt = SYSTEM_PROMPT.format(
         current_time=datetime.now(tz=UTC).isoformat(),
-        skill_catalog=ctx.skill_store.get_skill_catalog(),
+        skill_catalog=skill_catalog,
     )
     response = await agent.call_llm(state["messages"], system_prompt=system_prompt)
     update: dict = {"messages": [response]}

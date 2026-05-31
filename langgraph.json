@@ -1,6 +1,7 @@
 {
-  "dependencies": ["graphs"],
+  "dependencies": [".", "./graphs"],
   "graphs": {
     "skills_agent": "./graphs/skills_agent/agent.py:graph"
-  }
+  },
+  "env": "./.env"
 }

@@ -1,5 +1,4 @@
-# Runtime is provided by aegra-cli (installed via the Makefile, latest by default).
-# Last verified against aegra-cli 0.7.2.
+# Local runtime is provided by LangGraph CLI via `make dev`.
 [project]
 name = "langgraph-skills-agent"
 version = "0.2.5"
@@ -25,6 +24,16 @@ dev = [
 
 [tool.uv]
 package = false
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["graphs"]
+
+[tool.setuptools.package-data]
+"skills_agent" = ["skills/**/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

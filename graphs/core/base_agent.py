@@ -430,7 +430,7 @@ class BaseAgent:
           leak into the next turn's ``previous_errors`` injection at
           ``_serialize_previous_errors``.  The history was previously
           preserved "for analytics", but analytics consume LangFuse
-          traces or Aegra checkpoints — not in-memory graph state.
+          traces or LangGraph checkpoints — not in-memory graph state.
           Carrying a turn-1 error into turn 2's first tool call (where
           the user's question is unrelated) tells the LLM to avoid
           problems it isn't currently exhibiting and silently degrades
